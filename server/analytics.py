@@ -30,7 +30,7 @@ COOKIE_MAX_AGE = 365 * 24 * 3600  # 访客 Cookie 有效期 1 年
 PAGE_PATHS = ("/",)
 # 统计时忽略的路径：静态资源、看板自身轮询、探活，以及 /ws 长连接
 # （/ws 存活可达数分钟，计入 HTTP 用量会严重拉高平均耗时；它已由 sessions 表单独统计）
-IGNORED_PREFIXES = ("/static/", "/favicon", "/api/stats", "/healthz", "/ws")
+IGNORED_PREFIXES = ("/static/", "/favicon", "/api/stats", "/healthz", "/ws", "/login", "/api/login", "/api/logout")
 
 _BOT_RE = re.compile(
     r"bot|crawl|spider|slurp|bingpreview|facebookexternalhit|headlesschrome|"

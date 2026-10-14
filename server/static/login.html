@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>访问验证 · Gemini Live × Google Maps</title>
+<style>
+:root {
+  --blue: #1a73e8;
+  --blue-hover: #1765cc;
+  --red: #d93025;
+  --ink: #202124;
+  --sub: #5f6368;
+  --line: #dadce0;
+  --bg: #f8f9fa;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100%; }
+body {
+  font-family: 'Google Sans', 'Roboto', -apple-system, BlinkMacSystemFont,
+    'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  -webkit-font-smoothing: antialiased;
+}
+.auth-card {
+  width: 100%;
+  max-width: 420px;
+  background: #ffffff;
+  border: 1px solid #e8eaed;
+  border-radius: 16px;
+  padding: 36px 32px 32px;
+  box-shadow: 0 4px 20px rgba(60, 64, 67, 0.08);
+  text-align: center;
+}
+.logo-wrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  background: #f8f9fa;
+  border: 1px solid #e8eaed;
+  margin-bottom: 16px;
+}
+h1 {
+  margin: 0 0 6px;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--ink);
+  letter-spacing: -0.2px;
+}
+.desc {
+  margin: 0 0 24px;
+  font-size: 13px;
+  color: var(--sub);
+  line-height: 1.5;
+}
+.badge-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #e8f0fe;
+  color: var(--blue);
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 999px;
+  margin-bottom: 20px;
+}
+.field {
+  position: relative;
+  text-align: left;
+  margin-bottom: 16px;
+}
+.field label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--sub);
+  margin-bottom: 6px;
+}
+.input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.input-wrap input {
+  width: 100%;
+  height: 44px;
+  padding: 0 44px 0 14px;
+  font-size: 14px;
+  font-family: 'Roboto Mono', ui-monospace, monospace;
+  color: var(--ink);
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.input-wrap input:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(26, 115, 232, 0.15);
+}
+.toggle-btn {
+  position: absolute;
+  right: 8px;
+  background: transparent;
+  border: none;
+  color: var(--sub);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.toggle-btn:hover { background: #f1f3f4; color: var(--ink); }
+.err-msg {
+  display: none;
+  background: #fce8e6;
+  color: var(--red);
+  border: 1px solid #f5c3c0;
+  border-radius: 8px;
+  padding: 9px 12px;
+  font-size: 12.5px;
+  text-align: left;
+  margin-bottom: 16px;
+  line-height: 1.4;
+}
+.btn-submit {
+  width: 100%;
+  height: 44px;
+  background: var(--blue);
+  color: #fff;
+  border: none;
+  border-radius: 999px;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.btn-submit:hover {
+  background: var(--blue-hover);
+  box-shadow: 0 2px 6px rgba(26, 115, 232, 0.3);
+}
+.btn-submit:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.foot {
+  margin-top: 22px;
+  padding-top: 16px;
+  border-top: 1px solid #f1f3f4;
+  font-size: 11.5px;
+  color: var(--sub);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+</style>
+</head>
+<body>
+
+<div class="auth-card">
+  <div class="logo-wrap">
+    <svg viewBox="0 0 48 48" width="28" height="28" aria-hidden="true">
+      <path fill="#4285F4" d="M45.12 24.5c0-1.56-.14-3.06-.4-4.5H24v8.51h11.84c-.51 2.75-2.06 5.08-4.39 6.64v5.52h7.11c4.16-3.83 6.56-9.47 6.56-16.17z"/>
+      <path fill="#34A853" d="M24 46c5.94 0 10.92-1.97 14.56-5.33l-7.11-5.52c-1.97 1.32-4.49 2.1-7.45 2.1-5.73 0-10.58-3.87-12.31-9.07H4.34v5.7C7.96 41.07 15.4 46 24 46z"/>
+      <path fill="#FBBC05" d="M11.69 28.18C11.25 26.86 11 25.45 11 24s.25-2.86.69-4.18v-5.7H4.34C2.85 17.09 2 20.45 2 24s.85 6.91 2.34 9.88l7.35-5.7z"/>
+      <path fill="#EA4335" d="M24 10.75c3.23 0 6.13 1.11 8.41 3.29l6.31-6.31C34.91 4.18 29.93 2 24 2 15.4 2 7.96 6.93 4.34 14.12l7.35 5.7c1.73-5.2 6.58-9.07 12.31-9.07z"/>
+    </svg>
+  </div>
+
+  <div class="badge-row">🔒 访问受保护 · Gemini Live & Maps API 配额防盗刷</div>
+  <h1>Gemini Live · 智能语音导航</h1>
+  <p class="desc">本演示环境已启用访问口令保护，请输入授权密码以继续访问全景地图工作台与统计看板。</p>
+
+  <form id="loginForm" autocomplete="off">
+    <div class="field">
+      <label for="pwdInput">访问口令 (Access Password)</label>
+      <div class="input-wrap">
+        <input type="password" id="pwdInput" name="password" placeholder="请输入复杂访问密码…" required autofocus>
+        <button type="button" class="toggle-btn" id="toggleBtn">显示</button>
+      </div>
+    </div>
+    <div class="err-msg" id="errMsg"></div>
+    <button type="submit" class="btn-submit" id="submitBtn">验证并进入工作台</button>
+  </form>
+
+  <div class="foot">
+    <span>Gemini 3.8 / 3.1 Live · Google Maps</span>
+    <span>连续失败 5 次自动封禁 IP</span>
+  </div>
+</div>
+
+<script>
+const pwdInput = document.getElementById('pwdInput');
+const toggleBtn = document.getElementById('toggleBtn');
+const errMsg = document.getElementById('errMsg');
+const submitBtn = document.getElementById('submitBtn');
+const form = document.getElementById('loginForm');
+
+toggleBtn.onclick = () => {
+  const isPwd = pwdInput.type === 'password';
+  pwdInput.type = isPwd ? 'text' : 'password';
+  toggleBtn.textContent = isPwd ? '隐藏' : '显示';
+  pwdInput.focus();
+};
+
+form.onsubmit = async (e) => {
+  e.preventDefault();
+  errMsg.style.display = 'none';
+  const password = pwdInput.value.trim();
+  if (!password) return;
+  submitBtn.disabled = true;
+  submitBtn.textContent = '正在验证…';
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.ok) {
+      const params = new URLSearchParams(window.location.search);
+      const next = params.get('next') || '/';
+      window.location.replace(next.startsWith('/') ? next : '/');
+      return;
+    }
+    errMsg.textContent = data.error || '访问口令错误，请重试';
+    errMsg.style.display = 'block';
+    pwdInput.select();
+  } catch (err) {
+    errMsg.textContent = '网络请求异常，请稍后重试';
+    errMsg.style.display = 'block';
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = '验证并进入工作台';
+  }
+};
+</script>
+</body>
+</html>

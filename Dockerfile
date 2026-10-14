@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY server/ /app/server/
 
+ENV HOST=0.0.0.0
 ENV PORT=8080
 EXPOSE 8080
 

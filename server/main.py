@@ -6,9 +6,14 @@
 全程记录用户输入、大模型回复、工具调用与路线导航，支持本地日志持久化与可视化实时排查。
 """
 import os
+import hmac
 import time
 import json
+import hashlib
+import secrets
 import asyncio
+import threading
+import urllib.parse
 import aiohttp
 from aiohttp import web, WSMsgType
 
@@ -18,11 +23,34 @@ from logger import (
 )
 import analytics
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+STATIC = os.path.join(HERE, "static")
+
+
+def _load_env_files():
+    """自动从 /etc/maps-live.env 或本地 .env 加载环境变量（不覆盖已存在变量）。"""
+    for p in ("/etc/maps-live.env", os.path.join(HERE, ".env"), os.path.join(os.path.dirname(HERE), ".env")):
+        if os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    for raw in f:
+                        line = raw.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.strip().strip('"').strip("'")
+                        if k and k not in os.environ:
+                            os.environ[k] = v
+            except Exception:
+                pass
+
+
+_load_env_files()
+
 IDLE_TIMEOUT = float(os.environ.get("WS_IDLE_TIMEOUT", "900"))    # 客户端无任何上行帧超过该秒数才判定僵尸
 MAX_LIFETIME = float(os.environ.get("WS_MAX_LIFETIME", "21600"))  # 单条连接绝对上限 6h
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-STATIC = os.path.join(HERE, "static")
 GEMINI_KEY = os.environ.get("GEMINI_KEY", "").strip()
 # Maps Embed API key（浏览器端 iframe 用,受 referrer 限制,按设计公开）
 MAPS_KEY = os.environ.get("MAPS_KEY", "").strip()
@@ -31,6 +59,104 @@ STATS_TOKEN = os.environ.get("STATS_TOKEN", "").strip()
 UPSTREAM = ("wss://generativelanguage.googleapis.com/ws/"
             "google.ai.generativelanguage.v1beta.GenerativeService."
             "BidiGenerateContent?key=")
+
+# --------------------------------------------------------------------------
+# 访问安全网关：复杂密码 + HMAC 签名 Cookie + IP 防暴力破解 (与 Gemini TTS 同构)
+# --------------------------------------------------------------------------
+ACCESS_PASSWORD = (
+    os.environ.get("MAPS_ACCESS_PASSWORD")
+    or os.environ.get("ACCESS_PASSWORD")
+    or ""
+).strip()
+COOKIE_AUTH = "ml_auth"
+COOKIE_AUTH_MAX_AGE = 7 * 86400  # 7 天免重登
+
+_auth_lock = threading.Lock()
+_failed_attempts = {}   # ip -> [ts, ...]
+_lockout_until = {}     # ip -> unlock_ts
+AUTH_WINDOW_S = 600     # 10 分钟滑动窗口
+AUTH_MAX_FAILS = 5      # 连续错 5 次封禁
+AUTH_LOCKOUT_S = 900    # 封禁 15 分钟
+
+
+def _get_access_password() -> str:
+    return (
+        os.environ.get("MAPS_ACCESS_PASSWORD")
+        or os.environ.get("ACCESS_PASSWORD")
+        or ACCESS_PASSWORD
+    ).strip()
+
+
+def _auth_secret(pwd: str = None) -> bytes:
+    p = pwd if pwd is not None else _get_access_password()
+    return hashlib.sha256(("maps-live-auth-v1:" + p).encode("utf-8")).digest()
+
+
+def _check_ip_lockout(ip: str) -> int:
+    """返回剩余封禁秒数；0 表示未封禁。"""
+    now = time.time()
+    with _auth_lock:
+        until = _lockout_until.get(ip, 0)
+        if until > now:
+            return int(until - now) + 1
+        if until:
+            _lockout_until.pop(ip, None)
+        return 0
+
+
+def _record_auth_fail(ip: str) -> int:
+    """记录一次密码错误；若触发阈值则封禁并返回封禁秒数，否则返回剩余可试次数(负值区分)。"""
+    now = time.time()
+    with _auth_lock:
+        arr = [t for t in _failed_attempts.get(ip, []) if now - t < AUTH_WINDOW_S]
+        arr.append(now)
+        if len(arr) >= AUTH_MAX_FAILS:
+            _failed_attempts.pop(ip, None)
+            _lockout_until[ip] = now + AUTH_LOCKOUT_S
+            return AUTH_LOCKOUT_S
+        _failed_attempts[ip] = arr
+        return -(AUTH_MAX_FAILS - len(arr))
+
+
+def _clear_auth_fail(ip: str):
+    with _auth_lock:
+        _failed_attempts.pop(ip, None)
+        _lockout_until.pop(ip, None)
+
+
+def make_auth_token(ttl_s: int = COOKIE_AUTH_MAX_AGE) -> str:
+    exp = int(time.time()) + ttl_s
+    nonce = secrets.token_hex(8)
+    payload = f"{exp}.{nonce}"
+    sig = hmac.new(_auth_secret(), payload.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{payload}.{sig}"
+
+
+def verify_auth_token(token: str) -> bool:
+    if not token or token.count(".") != 2:
+        return False
+    try:
+        exp_s, nonce, sig = token.split(".")
+        if int(exp_s) < int(time.time()):
+            return False
+        payload = f"{exp_s}.{nonce}"
+        expected = hmac.new(_auth_secret(), payload.encode("ascii"), hashlib.sha256).hexdigest()
+        return secrets.compare_digest(sig, expected)
+    except Exception:
+        return False
+
+
+def is_authenticated(request) -> bool:
+    pwd = _get_access_password()
+    if not pwd:
+        return True
+    tok = request.cookies.get(COOKIE_AUTH)
+    if verify_auth_token(tok):
+        return True
+    hdr_key = request.headers.get("X-Access-Key", "")
+    if hdr_key and secrets.compare_digest(hdr_key, pwd):
+        return True
+    return False
 
 
 def _is_private_ip(ip: str) -> bool:
@@ -81,9 +207,80 @@ async def index(request):
     return resp
 
 
+async def login_page(request):
+    """Google 白底风格访问验证页。"""
+    if is_authenticated(request):
+        nxt = request.query.get("next") or "/"
+        raise web.HTTPFound(location=nxt if nxt.startswith("/") else "/")
+    return web.FileResponse(os.path.join(STATIC, "login.html"))
+
+
+async def login_post(request):
+    """POST /api/login：验证口令、防暴力破解封禁并下发 7 天签名 Cookie。"""
+    ip = analytics.client_ip_of(request)
+    lock_s = _check_ip_lockout(ip)
+    if lock_s > 0:
+        return web.json_response(
+            {"ok": False, "error": f"密码连续错误次数过多，当前 IP 已封禁，请 {lock_s} 秒后再试"},
+            status=429,
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "请求格式错误"}, status=400)
+
+    pwd_cfg = _get_access_password()
+    pwd = (body.get("password") or "").strip()
+    if (not pwd_cfg) or (pwd and secrets.compare_digest(pwd, pwd_cfg)):
+        _clear_auth_fail(ip)
+        log_event("AUTH", f"密码验证通过 ip={ip}")
+        resp = web.json_response({"ok": True})
+        if pwd_cfg:
+            resp.set_cookie(
+                COOKIE_AUTH, make_auth_token(),
+                max_age=COOKIE_AUTH_MAX_AGE, path="/", httponly=True, samesite="Lax",
+            )
+        return resp
+
+    res = _record_auth_fail(ip)
+    if res > 0:
+        log_event("ERROR", f"密码连续错误触发 IP 封禁 ({res}s) ip={ip}", level="WARN")
+        return web.json_response(
+            {"ok": False, "error": f"密码连续错误达 {AUTH_MAX_FAILS} 次，当前 IP 已封禁 15 分钟"},
+            status=429,
+        )
+    remain = -res
+    log_event("ERROR", f"登录密码错误 (剩余 {remain} 次机会) ip={ip}", level="WARN")
+    return web.json_response(
+        {"ok": False, "error": f"访问口令错误（剩余 {remain} 次尝试机会）"},
+        status=401,
+    )
+
+
+async def logout_handler(request):
+    """GET/POST /api/logout：销毁登录态并跳转至 /login。"""
+    resp = web.HTTPFound(location="/login")
+    resp.del_cookie(COOKIE_AUTH, path="/")
+    raise resp
+
+
 async def healthz(request):
-    return web.json_response({"ok": True, "key_loaded": bool(GEMINI_KEY),
-                              "maps_key_loaded": bool(MAPS_KEY)})
+    ip = analytics.client_ip_of(request)
+    auth_protected = bool(_get_access_password())
+    if (not auth_protected) or is_authenticated(request) or ip in ("127.0.0.1", "::1", "localhost"):
+        return web.json_response({
+            "ok": True,
+            "service": "maps-live",
+            "auth_protected": auth_protected,
+            "key_loaded": bool(GEMINI_KEY),
+            "maps_key_loaded": bool(MAPS_KEY),
+        })
+    # 未授权公网探针：仅返回最小存活性与鉴权开启状态，不暴露内部密钥加载详情
+    return web.json_response({
+        "ok": True,
+        "service": "maps-live",
+        "auth_protected": True,
+    })
 
 
 async def config(request):
@@ -92,7 +289,9 @@ async def config(request):
 
 
 def _stats_authorized(request) -> bool:
-    """未配置 STATS_TOKEN 时开放访问；配置后必须带正确 token。"""
+    """若已通过全局密码网关，直接放行；否则检查 STATS_TOKEN。"""
+    if _get_access_password() and is_authenticated(request):
+        return True
     if not STATS_TOKEN:
         return True
     return request.query.get("token", "") == STATS_TOKEN
@@ -379,9 +578,65 @@ async def ws_proxy(request):
 @web.middleware
 async def no_cache(request, handler):
     resp = await handler(request)
-    if request.path in ("/", "/config", "/stats") or request.path.startswith("/static/"):
+    if request.path in ("/", "/login", "/config", "/api/config", "/stats") or request.path.startswith("/static/"):
         resp.headers["Cache-Control"] = "no-store, must-revalidate"
     return resp
+
+
+@web.middleware
+async def auth_gate(request, handler):
+    """全路由强制鉴权网关：阻断未授权 API/WebSocket 盗刷与配置/日志/统计泄露。"""
+    pwd_cfg = _get_access_password()
+    if not pwd_cfg:
+        return await handler(request)
+
+    path = request.path
+    if path in ("/login", "/api/login", "/api/logout", "/healthz"):
+        return await handler(request)
+
+    # 支持书签直达免输密：GET /?key=<PASSWORD> 验证通过后写 Cookie 并 302 剥离地址栏明文口令
+    q_key = request.query.get("key", "")
+    if q_key and request.method == "GET":
+        ip = analytics.client_ip_of(request)
+        lock_s = _check_ip_lockout(ip)
+        if lock_s > 0:
+            return web.Response(
+                status=429,
+                text=f"429 Too Many Requests: IP locked for {lock_s}s due to repeated failed auth.",
+            )
+        if secrets.compare_digest(q_key, pwd_cfg):
+            _clear_auth_fail(ip)
+            log_event("AUTH", f"通过专属密钥链接授权成功 ip={ip}")
+            clean_q = [(k, v) for k, v in request.query.items() if k != "key"]
+            target = path + ("?" + urllib.parse.urlencode(clean_q) if clean_q else "")
+            resp = web.HTTPFound(location=target)
+            resp.set_cookie(
+                COOKIE_AUTH, make_auth_token(),
+                max_age=COOKIE_AUTH_MAX_AGE, path="/", httponly=True, samesite="Lax",
+            )
+            raise resp
+        else:
+            res = _record_auth_fail(ip)
+            log_event("ERROR", f"URL 密钥口令错误 ip={ip}", level="WARN")
+            if res > 0:
+                return web.Response(status=429, text=f"429 Too Many Requests: IP locked for {res}s")
+
+    if is_authenticated(request):
+        return await handler(request)
+
+    # 未授权拦截：API、WebSocket、配置接口一律 401 JSON，静态文件 401，页面访问 302 跳转至 /login
+    if path.startswith("/api/") or path in ("/config", "/geo", "/ws") or request.method != "GET":
+        return web.json_response(
+            {"ok": False, "error": "未授权访问：请先输入访问密码登录"}, status=401
+        )
+    if path.startswith("/static/"):
+        return web.Response(status=401, text="401 Unauthorized")
+
+    next_url = request.rel_url.path_qs
+    login_url = "/login"
+    if next_url and next_url != "/":
+        login_url = "/login?" + urllib.parse.urlencode({"next": next_url})
+    raise web.HTTPFound(location=login_url)
 
 
 @web.middleware
@@ -414,10 +669,15 @@ async def usage_tracker(request, handler):
 
 
 def make_app():
-    app = web.Application(middlewares=[no_cache, usage_tracker])
+    app = web.Application(middlewares=[no_cache, auth_gate, usage_tracker])
     app.router.add_get("/", index)
+    app.router.add_get("/login", login_page)
+    app.router.add_post("/api/login", login_post)
+    app.router.add_get("/api/logout", logout_handler)
+    app.router.add_post("/api/logout", logout_handler)
     app.router.add_get("/healthz", healthz)
     app.router.add_get("/config", config)
+    app.router.add_get("/api/config", config)
     app.router.add_get("/geo", geo)
     app.router.add_get("/api/geo", geo)
     app.router.add_get("/api/directions", directions)
@@ -429,5 +689,6 @@ def make_app():
 
 
 if __name__ == "__main__":
+    host = os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", 8080))
-    web.run_app(make_app(), host="0.0.0.0", port=port)
+    web.run_app(make_app(), host=host, port=port)
