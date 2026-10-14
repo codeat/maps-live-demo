@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
+<title>Maps Live · 访客与 API 用量看板</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0 0 48px 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans SC", Helvetica, Arial, sans-serif;
+    background: #f1f3f4; color: #202124;
+  }
+  header {
+    background: #fff; border-bottom: 1px solid #e0e0e0; padding: 14px 24px;
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    position: sticky; top: 0; z-index: 20; box-shadow: 0 1px 3px rgba(60,64,67,.12);
+  }
+  .logo { font-size: 19px; font-weight: 600; color: #1a73e8; display: flex; align-items: center; gap: 8px; }
+  .logo .dot { width: 9px; height: 9px; border-radius: 50%; background: #34a853; animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+  .spacer { flex: 1; }
+  .seg { display: flex; background: #f1f3f4; border-radius: 999px; padding: 3px; }
+  .seg button {
+    border: 0; background: transparent; padding: 6px 15px; border-radius: 999px;
+    cursor: pointer; font-size: 13px; color: #5f6368; font-weight: 600; transition: .15s;
+  }
+  .seg button.on { background: #1a73e8; color: #fff; box-shadow: 0 1px 3px rgba(26,115,232,.4); }
+  .btn {
+    border: 1px solid #dadce0; background: #fff; border-radius: 8px; padding: 7px 14px;
+    cursor: pointer; font-size: 13px; color: #3c4043; font-weight: 600;
+  }
+  .btn:hover { background: #f8f9fa; }
+  .btn.on { background: #e8f0fe; border-color: #1a73e8; color: #1a73e8; }
+  .meta { font-size: 12px; color: #80868b; }
+
+  main { max-width: 1400px; margin: 0 auto; padding: 22px 24px; }
+  .grid { display: grid; gap: 14px; }
+  .kpis { grid-template-columns: repeat(auto-fit, minmax(178px, 1fr)); margin-bottom: 20px; }
+  .kpi {
+    background: #fff; border-radius: 12px; padding: 16px 18px; border: 1px solid #e8eaed;
+    box-shadow: 0 1px 2px rgba(60,64,67,.08); position: relative; overflow: hidden;
+  }
+  .kpi::before { content:""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--c, #1a73e8); }
+  .kpi .lbl { font-size: 12px; color: #5f6368; font-weight: 600; letter-spacing: .3px; }
+  .kpi .val { font-size: 30px; font-weight: 700; color: #202124; line-height: 1.25; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .kpi .sub { font-size: 11px; color: #80868b; margin-top: 2px; }
+
+  .card {
+    background: #fff; border-radius: 12px; border: 1px solid #e8eaed; padding: 18px 20px;
+    box-shadow: 0 1px 2px rgba(60,64,67,.08); margin-bottom: 16px;
+  }
+  .card h2 {
+    margin: 0 0 14px 0; font-size: 13px; text-transform: uppercase; letter-spacing: .6px;
+    color: #3c4043; font-weight: 700; display: flex; align-items: center; gap: 8px;
+  }
+  .card h2 .tag { font-size: 10px; background: #e8f0fe; color: #1a73e8; padding: 2px 8px; border-radius: 10px; letter-spacing: 0; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .three { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+  @media (max-width: 1000px) { .two, .three { grid-template-columns: 1fr; } }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th {
+    text-align: left; padding: 8px 10px; color: #5f6368; font-weight: 600; font-size: 11px;
+    text-transform: uppercase; letter-spacing: .4px; border-bottom: 2px solid #e8eaed; white-space: nowrap;
+  }
+  td { padding: 9px 10px; border-bottom: 1px solid #f1f3f4; color: #3c4043; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tbody tr:hover { background: #f8f9fa; }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .pill.blue { background: #e8f0fe; color: #1a73e8; }
+  .pill.green { background: #e6f4ea; color: #137333; }
+  .pill.grey { background: #f1f3f4; color: #5f6368; }
+  .pill.amber { background: #fef7e0; color: #b06000; }
+  .pill.red { background: #fce8e6; color: #c5221f; }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+
+  .bar-wrap { background: #f1f3f4; border-radius: 4px; height: 7px; overflow: hidden; min-width: 60px; }
+  .bar { height: 100%; background: #1a73e8; border-radius: 4px; }
+
+  .chart { width: 100%; height: 190px; display: block; }
+  .empty { text-align: center; color: #9aa0a6; padding: 28px 0; font-size: 13px; }
+  .err { background: #fce8e6; color: #c5221f; padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo"><span class="dot"></span>Maps Live · 访客与 API 用量看板</div>
+  <div class="seg" id="rangeSeg">
+    <button data-days="1">今天</button>
+    <button data-days="7">近 7 天</button>
+    <button data-days="30" class="on">近 30 天</button>
+    <button data-days="90">近 90 天</button>
+  </div>
+  <button class="btn" id="btnBots" title="默认已过滤爬虫与压测脚本流量">🤖 含爬虫</button>
+  <button class="btn" id="btnRefresh">🔄 刷新</button>
+  <div class="spacer"></div>
+  <div class="meta" id="meta">加载中…</div>
+</header>
+
+<main>
+  <div id="err"></div>
+
+  <div class="grid kpis" id="kpis"></div>
+
+  <div class="card">
+    <h2>每日趋势 <span class="tag">访问量 / 语音会话 / API 调用</span></h2>
+    <svg class="chart" id="trend" preserveAspectRatio="none"></svg>
+    <div id="trendLegend" style="font-size:12px;color:#5f6368;margin-top:8px;display:flex;gap:18px;flex-wrap:wrap;"></div>
+  </div>
+
+  <div class="two">
+    <div class="card">
+      <h2>大模型用量分布 <span class="tag">Gemini Live</span></h2>
+      <table><thead><tr>
+        <th>模型</th><th class="num">会话数</th><th class="num">语音(分)</th>
+        <th class="num">提问</th><th class="num">工具调用</th><th class="num">打断</th><th class="num">均时长(s)</th>
+      </tr></thead><tbody id="tbModel"></tbody></table>
+    </div>
+    <div class="card">
+      <h2>API 端点调用量 <span class="tag">HTTP</span></h2>
+      <table><thead><tr>
+        <th>端点</th><th class="num">调用次数</th><th class="num">平均耗时</th><th class="num">错误</th><th style="width:120px;">占比</th>
+      </tr></thead><tbody id="tbEndpoint"></tbody></table>
+    </div>
+  </div>
+
+  <div class="three">
+    <div class="card">
+      <h2>地域分布</h2>
+      <table><thead><tr><th>国家 / 城市</th><th class="num">访问</th><th class="num">独立IP</th></tr></thead>
+      <tbody id="tbRegion"></tbody></table>
+    </div>
+    <div class="card">
+      <h2>设备 / 浏览器</h2>
+      <table><thead><tr><th>类别</th><th>名称</th><th class="num">访问</th></tr></thead>
+      <tbody id="tbDevice"></tbody></table>
+    </div>
+    <div class="card">
+      <h2>热门导航目的地 <span class="tag">Function Call</span></h2>
+      <table><thead><tr><th>目的地 / 工具</th><th class="num">次数</th></tr></thead>
+      <tbody id="tbDest"></tbody></table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>最近语音会话明细 <span class="tag">Live Session</span></h2>
+    <table><thead><tr>
+      <th>时间</th><th>#ID</th><th>来源</th><th>模型</th>
+      <th class="num">时长(s)</th><th class="num">语音(分)</th><th class="num">提问</th>
+      <th class="num">回复</th><th class="num">工具</th><th class="num">打断</th>
+    </tr></thead><tbody id="tbSession"></tbody></table>
+  </div>
+
+  <div class="card">
+    <h2>最近访客明细 <span class="tag">Visitors</span></h2>
+    <table><thead><tr>
+      <th>时间</th><th>访客ID</th><th>IP</th><th>地区</th><th>设备</th><th>浏览器</th><th>系统</th><th>来源</th><th>类型</th>
+    </tr></thead><tbody id="tbVisitor"></tbody></table>
+  </div>
+</main>
+
+<script>
+let DAYS = 30, BOTS = 0, timer = null;
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const token = new URLSearchParams(location.search).get("token") || "";
+
+function kpi(label, value, sub, color) {
+  return `<div class="kpi" style="--c:${color}">
+    <div class="lbl">${label}</div><div class="val">${value}</div><div class="sub">${sub}</div></div>`;
+}
+
+function renderKpis(d) {
+  const t = d.totals, today = d.today;
+  $("kpis").innerHTML = [
+    kpi("独立访客", t.unique_visitors, `今日 ${today.unique_visitors} 人 · 新访客 ${t.new_visitors}`, "#1a73e8"),
+    kpi("页面访问 PV", t.visits, `今日 ${today.visits} 次 · 独立IP ${t.unique_ips}`, "#188038"),
+    kpi("语音会话数", t.sessions, `今日 ${today.sessions} 次 · 均时长 ${t.avg_session_s}s`, "#e37400"),
+    kpi("语音时长", t.voice_minutes + " 分", `上行麦克风累计录音时长`, "#9334e6"),
+    kpi("模型交互轮次", t.user_turns + " / " + t.model_turns, `用户提问 / 模型回复`, "#d93025"),
+    kpi("工具调用", t.tool_calls, `导航等 Function Call · 搜索 ${t.searches}`, "#1a73e8"),
+    kpi("打断次数", t.interrupts, `用户中途插话打断播报`, "#e37400"),
+    kpi("API 调用总量", t.api_calls, `今日 ${today.api_calls} 次 · 均 ${t.api_avg_ms}ms · 错误 ${t.api_errors}`, "#188038"),
+  ].join("");
+}
+
+function renderTrend(rows) {
+  const svg = $("trend");
+  if (!rows.length) { svg.innerHTML = ""; $("trendLegend").innerHTML = '<span class="empty">暂无数据</span>'; return; }
+  const W = svg.clientWidth || 1200, H = 190, PB = 26, PL = 38, PT = 12;
+  const max = Math.max(1, ...rows.map(r => Math.max(r.visits, r.sessions, r.api_calls)));
+  const n = rows.length, slot = (W - PL - 10) / n, bw = Math.max(3, Math.min(16, slot / 4.2));
+  const y = v => PT + (H - PB - PT) * (1 - v / max);
+  let g = "";
+  for (let i = 0; i <= 4; i++) {
+    const v = Math.round(max * i / 4), yy = y(v);
+    g += `<line x1="${PL}" y1="${yy}" x2="${W}" y2="${yy}" stroke="#f1f3f4"/>
+          <text x="${PL - 6}" y="${yy + 4}" font-size="10" fill="#9aa0a6" text-anchor="end">${v}</text>`;
+  }
+  rows.forEach((r, i) => {
+    const x = PL + slot * i + slot / 2;
+    const series = [[r.visits, "#1a73e8"], [r.sessions, "#e37400"], [r.api_calls, "#34a853"]];
+    series.forEach((s, k) => {
+      const h = Math.max(0, (H - PB - PT) * s[0] / max), bx = x + (k - 1) * (bw + 1.5) - bw / 2;
+      g += `<rect x="${bx}" y="${H - PB - h}" width="${bw}" height="${h}" rx="2" fill="${s[1]}">
+              <title>${r.day}\n访问 ${r.visits} · 会话 ${r.sessions} · API ${r.api_calls} · 语音 ${r.voice_minutes}分</title></rect>`;
+    });
+    if (n <= 16 || i % Math.ceil(n / 14) === 0) {
+      g += `<text x="${x}" y="${H - 8}" font-size="10" fill="#80868b" text-anchor="middle">${r.day.slice(5)}</text>`;
+    }
+  });
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.innerHTML = g;
+  $("trendLegend").innerHTML = [["#1a73e8","页面访问"],["#e37400","语音会话"],["#34a853","API 调用"]]
+    .map(([c, l]) => `<span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${c};margin-right:5px;"></span>${l}</span>`).join("");
+}
+
+function fill(id, rows, fn, cols) {
+  const tb = $(id);
+  if (!rows || !rows.length) { tb.innerHTML = `<tr><td colspan="${cols}" class="empty">暂无数据</td></tr>`; return; }
+  tb.innerHTML = rows.map(fn).join("");
+}
+
+function render(d) {
+  renderKpis(d);
+  renderTrend(d.by_day);
+
+  fill("tbModel", d.by_model, m => `<tr>
+    <td><span class="pill blue">${esc(m.model.replace("models/", ""))}</span></td>
+    <td class="num">${m.sessions}</td><td class="num">${m.voice_minutes}</td>
+    <td class="num">${m.user_turns}</td><td class="num">${m.tool_calls}</td>
+    <td class="num">${m.interrupts}</td><td class="num">${m.avg_duration_s}</td></tr>`, 7);
+
+  const maxCall = Math.max(1, ...(d.by_endpoint || []).map(e => e.calls));
+  fill("tbEndpoint", d.by_endpoint, e => `<tr>
+    <td class="mono">${esc(e.endpoint)}</td><td class="num"><b>${e.calls}</b></td>
+    <td class="num">${e.avg_ms} ms</td>
+    <td class="num">${e.errors ? `<span class="pill red">${e.errors}</span>` : '<span class="pill green">0</span>'}</td>
+    <td><div class="bar-wrap"><div class="bar" style="width:${(e.calls / maxCall * 100).toFixed(1)}%"></div></div></td></tr>`, 5);
+
+  fill("tbRegion", d.by_region, r => `<tr>
+    <td>${esc(r.country)} · ${esc(r.city)}</td>
+    <td class="num">${r.visits}</td><td class="num">${r.unique_ips}</td></tr>`, 3);
+
+  const dev = (d.by_device || []).map(x => `<tr><td><span class="pill grey">设备</span></td><td>${esc(x.device)}</td><td class="num">${x.visits}</td></tr>`);
+  const brw = (d.by_browser || []).map(x => `<tr><td><span class="pill blue">浏览器</span></td><td>${esc(x.browser)}</td><td class="num">${x.visits}</td></tr>`);
+  $("tbDevice").innerHTML = (dev.concat(brw).join("")) || `<tr><td colspan="3" class="empty">暂无数据</td></tr>`;
+
+  const dst = (d.top_destinations || []).map(x => `<tr><td>📍 ${esc(x.destination)}</td><td class="num">${x.count}</td></tr>`);
+  const tls = (d.top_tools || []).map(x => `<tr><td><span class="pill amber">🔧 ${esc(x.tool_name)}</span></td><td class="num">${x.count}</td></tr>`);
+  $("tbDest").innerHTML = (tls.concat(dst).join("")) || `<tr><td colspan="2" class="empty">暂无数据</td></tr>`;
+
+  fill("tbSession", d.recent_sessions, s => `<tr>
+    <td class="mono">${esc(s.time)}</td><td class="num">#${s.client_id}</td>
+    <td>${esc(s.city || "未知")}${s.ip ? ` <span class="mono" style="color:#9aa0a6">${esc(s.ip)}</span>` : ""}</td>
+    <td><span class="pill blue">${esc(s.model_short)}</span></td>
+    <td class="num">${s.duration_s}</td><td class="num">${s.voice_minutes}</td>
+    <td class="num">${s.user_turns}</td><td class="num">${s.model_turns}</td>
+    <td class="num">${s.tool_calls}</td><td class="num">${s.interrupts}</td></tr>`, 10);
+
+  fill("tbVisitor", d.recent_visitors, v => `<tr>
+    <td class="mono">${esc(v.time)}</td>
+    <td class="mono">${esc(v.visitor_short)}</td>
+    <td class="mono">${esc(v.ip || "-")}</td>
+    <td>${esc(v.country || "未知")} ${esc(v.city || "")}</td>
+    <td>${esc(v.device)}</td><td>${esc(v.browser)}</td><td>${esc(v.os)}</td>
+    <td class="mono" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(v.referer || "直接访问")}</td>
+    <td>${v.is_bot ? '<span class="pill red">爬虫</span>' : (v.is_new ? '<span class="pill green">新访客</span>' : '<span class="pill grey">回访</span>')}</td>
+    </tr>`, 9);
+
+  $("meta").textContent = `更新于 ${d.generated_at} · 统计范围 ${d.range_days} 天 · 已过滤爬虫 ${d.totals.bot_hits} 次` +
+    (d.include_bots ? "（当前含爬虫）" : "");
+}
+
+async function load() {
+  try {
+    const q = `days=${DAYS}&bots=${BOTS}` + (token ? `&token=${encodeURIComponent(token)}` : "");
+    const r = await fetch(`/api/stats?${q}`, { cache: "no-store" });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    $("err").innerHTML = "";
+    render(d);
+  } catch (e) {
+    $("err").innerHTML = `<div class="err">加载统计数据失败：${esc(e.message)}</div>`;
+  }
+}
+
+$("rangeSeg").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  [...$("rangeSeg").children].forEach(x => x.classList.remove("on"));
+  b.classList.add("on"); DAYS = +b.dataset.days; load();
+});
+$("btnBots").addEventListener("click", () => {
+  BOTS = BOTS ? 0 : 1;
+  $("btnBots").classList.toggle("on", !!BOTS);
+  load();
+});
+$("btnRefresh").addEventListener("click", load);
+window.addEventListener("resize", () => clearTimeout(timer) || (timer = setTimeout(load, 250)));
+load();
+setInterval(load, 20000);   // 每 20 秒自动刷新
+</script>
+</body>
+</html>

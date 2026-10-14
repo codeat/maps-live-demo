@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gemini Live · Google Maps & Voice Agent (On-Demand Dispatch)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Google+Sans+Text:wght@400;500;700&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css?v=97">
+</head>
+<body>
+
+<!-- 全屏 Google Maps 背景 (100vw x 100vh) -->
+<div id="map" class="fullscreen-map"></div>
+
+<!-- 顶部 Google 官方经典绿色导航路牌条 (正式开始导航后滑出) -->
+<div id="navBanner" class="nav-banner hidden">
+  <div class="nav-banner-inner">
+    <div class="nav-turn-symbol" id="navTurnIcon">⬆️</div>
+    <div class="nav-turn-info">
+      <div class="nav-turn-dist" id="navTurnDist">准备出发</div>
+      <div class="nav-turn-road" id="navTurnRoad">沿当前道路行驶…</div>
+    </div>
+    <div class="nav-meta">
+      <div class="nav-mode-badge" id="navActiveModeBadge">🚗 开车</div>
+      <div class="nav-meta-stat">
+        <span class="val" id="navMetaTime">--</span>
+        <span class="unit">分钟</span>
+      </div>
+      <div class="nav-meta-stat">
+        <span class="val" id="navMetaDist">--</span>
+        <span class="unit">公里</span>
+      </div>
+
+      <!-- 导航演示加速控制器 -->
+      <div class="nav-speed-group" title="导航演示倍速切换">
+        <span class="speed-tag-label">⚡ 加速:</span>
+        <button class="speed-btn active" data-speed="1">1x</button>
+        <button class="speed-btn" data-speed="5">5x</button>
+        <button class="speed-btn" data-speed="20">20x</button>
+        <button class="speed-btn speed-instant" data-speed="instant" title="快速直达目的地">⏭️ 直达</button>
+      </div>
+
+      <button id="btnPauseNav" class="btn-pause-nav" title="暂停/继续巡航">⏸️ 暂停</button>
+      <button id="btnExitNav" class="btn-exit-nav" title="退出导航">✕</button>
+    </div>
+  </div>
+</div>
+
+<!-- 左上角悬浮 Google 智能面板 (全景地图控制台) -->
+<div class="floating-panel" id="floatingPanel">
+  <!-- 顶层主搜索与全双工语音输入胶囊 (独享整行，宽敞清晰，绝不挤压文本输入框) -->
+  <div class="search-capsule">
+    <div class="brand-logo-unit" title="Google Maps x Gemini Live">
+      <svg class="google-logo-svg" viewBox="0 0 24 24" width="22" height="22">
+        <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.66-5.17 3.66-9.17z"/>
+        <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.33 24 12 24z"/>
+        <path fill="#FBBC05" d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.25C.45 8.18 0 9.99 0 12s.45 3.82 1.25 5.42l4.03-3.15z"/>
+        <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"/>
+      </svg>
+      <span class="brand-logo-text">Maps</span>
+      <span class="brand-live-badge">Live</span>
+    </div>
+
+    <div class="search-divider"></div>
+
+    <input id="text" type="text" class="search-input" placeholder="搜地点、查路线、日常闲聊…" autocomplete="off">
+    
+    <button id="btnMainMic" class="mic-btn" title="点击语音说话 (实时拾音)">
+      <span class="mic-icon">🎙️</span>
+    </button>
+
+    <button id="btnSend" class="search-btn" title="发送">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="22" y1="2" x2="11" y2="13"></line>
+        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+      </svg>
+    </button>
+  </div>
+
+  <!-- 次级独立控制与状态条 (起点选择 + Gemini 3.8/3.1 切换 + Live 状态) -->
+  <div class="panel-meta-bar">
+    <div class="city-selector-wrap" title="选择当前所在城市 / 出发起点">
+      <span class="meta-pin-icon">📍</span>
+      <select id="citySelect" class="city-select" title="选择当前所在城市 / 出发起点">
+        <option value="sg" selected>🇸🇬 乌节路 (2号口)</option>
+        <option value="sf">🇺🇸 联合广场 (B口)</option>
+        <option value="tyo">🇯🇵 涉谷站 (八公口)</option>
+        <option value="par">🇫🇷 埃菲尔铁塔</option>
+        <option value="gps">📍 当前位置 (GPS)</option>
+      </select>
+      <span class="city-arrow">▾</span>
+    </div>
+
+    <div class="model-selector-wrap" title="选择 Gemini Live 大模型">
+      <select id="modelSelect" class="model-select" title="选择 Gemini Live 大模型">
+        <option value="models/gemini-3.8-live" selected>✨ 3.8 Live (低延迟)</option>
+        <option value="models/gemini-3.8-live-extended-thinking">🧠 3.8 Thinking (深度思考)</option>
+        <option value="models/gemini-3.1-flash-live-preview">⚡ 3.1 Live (经典)</option>
+      </select>
+      <span class="model-arrow">▾</span>
+    </div>
+
+    <div class="meta-status-pill" title="Live WebSocket 实时连接状态">
+      <span class="meta-status-dot" id="metaStateDot"></span>
+      <span class="meta-status-text" id="metaStateText">Live 就绪</span>
+    </div>
+  </div>
+
+  <!-- 动态提示词芯片栏 (随城市自动刷新) -->
+  <div class="chips-scroll-wrap">
+    <div class="chips-scroll" id="promptChips"></div>
+  </div>
+
+  <!-- 出行方式选择与路线预览卡片 (支持用户选择步行/骑行/开车后再导航) -->
+  <div id="routePreviewCard" class="route-preview-card hidden">
+    <div class="preview-header">
+      <div class="preview-dest-info">
+        <span class="preview-pin">📍</span>
+        <div>
+          <div class="preview-title" id="previewDestTitle">目的地名称</div>
+          <div class="preview-subtitle" id="previewDestSubtitle">路线规划已就绪，请选择出行方式</div>
+        </div>
+      </div>
+      <button id="btnClosePreview" class="btn-close-preview" title="关闭路线预览">✕</button>
+    </div>
+
+    <!-- 路线规划起点与目的地微看板 -->
+    <div class="preview-od-card">
+      <div class="preview-od-row origin">
+        <span class="od-dot green"></span>
+        <span class="od-label">起点</span>
+        <span class="od-name" id="previewOriginName">乌节地铁站 2号口 (ION Orchard)</span>
+      </div>
+      <div class="preview-od-divider"></div>
+      <div class="preview-od-row dest">
+        <span class="od-dot red"></span>
+        <span class="od-label">目的地</span>
+        <span class="od-name" id="previewDestInline">目的地名称</span>
+      </div>
+    </div>
+
+    <!-- 出行方式选择 Tabs: 开车 / 骑行 / 步行 -->
+    <div class="mode-tabs">
+      <button class="mode-tab active" id="tabDriving" data-mode="DRIVING">
+        <span class="mode-icon">🚗</span>
+        <span class="mode-name">开车</span>
+        <span class="mode-eta" id="etaDriving">计算中…</span>
+      </button>
+      <button class="mode-tab" id="tabBicycling" data-mode="BICYCLING">
+        <span class="mode-icon">🚲</span>
+        <span class="mode-name">骑行</span>
+        <span class="mode-eta" id="etaBicycling">计算中…</span>
+      </button>
+      <button class="mode-tab" id="tabWalking" data-mode="WALKING">
+        <span class="mode-icon">🚶</span>
+        <span class="mode-name">步行</span>
+        <span class="mode-eta" id="etaWalking">计算中…</span>
+      </button>
+    </div>
+
+    <!-- 备选路线切换器 (多条路线选择) -->
+    <div class="alt-routes-row" id="altRoutesSelector">
+      <span class="alt-label">方案选择：</span>
+      <div class="alt-pills" id="altRoutesList"></div>
+    </div>
+
+    <!-- 路线方案与耗时说明 -->
+    <div class="preview-stat-row" id="previewStatText">正在规划最佳出行方案…</div>
+
+    <!-- 正式开始导航大按钮 -->
+    <button id="btnStartNavigation" class="btn-start-nav">
+      <span class="start-icon">▶</span>
+      <span>开始导航</span>
+    </button>
+  </div>
+
+  <!-- Gemini 3.8/3.1 Live 智能对话框与按需工具调度遥测 -->
+  <div class="assistant-card" id="assistantCard">
+    <div class="assistant-header">
+      <div class="assistant-title">
+        <span class="sparkle-icon">✨</span>
+        <span id="astHeaderModelName">Gemini 3.8 Live</span>
+        <span id="stateDot" class="status-indicator" title="连接正常"></span>
+      </div>
+      <div class="assistant-tags">
+        <span id="tagNative" class="tag native hidden">🧠 原生推理 (零开销)</span>
+        <span id="tagSearch" class="tag search hidden">🌐 Google Search (按需)</span>
+        <span id="tagMaps" class="tag maps hidden">🗺️ Google Maps (按需)</span>
+        <span id="tagFunction" class="tag function hidden">⚡ Function Call (按需)</span>
+      </div>
+    </div>
+    
+    <div class="assistant-body">
+      <p id="userBubble" class="user-text hidden"></p>
+      <p id="modelBubble" class="model-text">正在收听…</p>
+      <!-- 推荐内容一键选项按键 (免打字直达) -->
+      <div id="recOptionsConsole" class="rec-options-container hidden"></div>
+      <div id="telemetryBox" class="telemetry-box hidden">
+        <div class="telemetry-header" id="astTelemetryHeader">⚡ Gemini 3.8 动态按需调度遥测 (On-Demand Dispatch)：</div>
+        <div class="telemetry-row hidden" id="telNativeRow"><span class="tel-tag native">Native</span> <span class="tel-text" id="telNativeText">纯模型原生推理 (未调用外部搜索/地图/函数，零外部延迟)</span></div>
+        <div class="telemetry-row hidden" id="telSearchRow"><span class="tel-tag search">Search</span> <span class="tel-text" id="telSearchText">--</span></div>
+        <div class="telemetry-row hidden" id="telMapsRow"><span class="tel-tag maps">Maps</span> <span class="tel-text" id="telMapsText">--</span></div>
+        <div class="telemetry-row hidden" id="telFcRow"><span class="tel-tag fc">Function</span> <span class="tel-text" id="telFcText">--</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 右上角形态切换悬浮胶囊 (地图、手机、眼镜、纯语音助手) -->
+<div class="view-switch-pill" id="viewTabs">
+  <button class="view-btn active" id="btnTabConsole" data-view="console" title="桌面全景智能工作台">
+    🗺️ 全景地图
+  </button>
+  <button class="view-btn" id="btnTabMobile" data-view="mobile" title="手机旅行伴侣完整体验">
+    📱 手机端
+  </button>
+  <button class="view-btn" id="btnTabGlasses" data-view="glasses" title="AR 智能眼镜双目 HUD">
+    👓 AR 眼镜
+  </button>
+  <button class="view-btn" id="btnTabAssistant" data-view="assistant" title="Gemini 纯语音助手专属工作台">
+    🎙️ 语音助手
+  </button>
+</div>
+
+<!-- 手机端完整模拟层 (自包含全部功能 + 地图/助手双模式) -->
+<div id="viewMobileOverlay" class="device-overlay hidden">
+  <div class="mobile-phone-frame phone-frame">
+    <div class="mobile-screen phone-screen">
+      <!-- 手机顶部状态栏 -->
+      <div class="mobile-status-bar phone-status-bar">
+        <span>09:41</span>
+        <div class="mobile-notch phone-notch"></div>
+        <span>5G · 100% 🔋</span>
+      </div>
+
+      <!-- 手机顶部定位与模式导航栏 -->
+      <div class="mobile-app-header">
+        <div class="mob-city-wrap">
+          <select id="mobCitySelect" class="mob-city-select" title="手机端选择当前出发位置 / 模拟起点">
+            <option value="sg" selected>🇸🇬 乌节路 (2号口)</option>
+            <option value="sf">🇺🇸 联合广场 (B口)</option>
+            <option value="tyo">🇯🇵 涉谷站 (八公口)</option>
+            <option value="par">🇫🇷 埃菲尔铁塔</option>
+            <option value="gps">📍 当前位置 (GPS)</option>
+          </select>
+        </div>
+        <div class="mob-model-wrap" title="手机端选择 Gemini Live 模型">
+          <select id="mobModelSelect" class="mob-model-select" title="选择模型">
+            <option value="models/gemini-3.8-live" selected>✨ 3.8 Live</option>
+            <option value="models/gemini-3.8-live-extended-thinking">🧠 3.8 Think</option>
+            <option value="models/gemini-3.1-flash-live-preview">⚡ 3.1 Live</option>
+          </select>
+        </div>
+        <div class="mob-view-switcher">
+          <button class="mob-view-tab active" id="mobTabMap" data-subview="map">🗺️ 地图</button>
+          <button class="mob-view-tab" id="mobTabChat" data-subview="chat">🎙️ 助手</button>
+        </div>
+      </div>
+
+      <!-- 手机端搜索与麦克风语音输入条 -->
+      <div class="mobile-search-capsule">
+        <svg class="mob-google-logo" viewBox="0 0 24 24" width="18" height="18">
+          <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.66-5.17 3.66-9.17z"/>
+          <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.33 24 12 24z"/>
+          <path fill="#FBBC05" d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.25C.45 8.18 0 9.99 0 12s.45 3.82 1.25 5.42l4.03-3.15z"/>
+          <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"/>
+        </svg>
+        <input id="mobSearchInput" type="text" class="mob-search-input" placeholder="搜地点、查路线、问天气、日常闲聊…" autocomplete="off">
+        <button id="mobBtnMic" class="mob-mic-btn" title="点击开始说话">🎙️</button>
+        <button id="mobBtnSend" class="mob-send-btn" title="发送">➤</button>
+      </div>
+
+      <!-- 手机端提示词灵感芯片横向滚动区 -->
+      <div class="mob-chips-scroll" id="mobPromptChips"></div>
+
+      <!-- 主视图容器: 地图视窗 / 语音助手视窗 -->
+      <div class="mobile-content-box">
+        <!-- 1. 手机地图主视窗 -->
+        <div id="mobMapContainer" class="mob-view-panel">
+          <div class="mobile-map-box">
+            <div id="mapMobile" class="mobile-map-canvas"></div>
+            <!-- 巡航悬浮转弯指示卡片 -->
+            <div class="mobile-turn-float hidden" id="mobTurnCard">
+              <span class="turn-sym" id="mobTurnIcon">⬆️</span>
+              <div class="turn-txt">
+                <div class="dist" id="mobTurnDist">准备出发</div>
+                <div class="road" id="mobTurnRoad">路线规划中…</div>
+              </div>
+            </div>
+
+            <!-- 手机端地图实时字幕灵动岛 / 语音交互悬浮卡片 -->
+            <div class="mob-map-subtitle-card hidden" id="mobMapSubtitleCard">
+              <div class="mob-sub-header">
+                <div class="mob-sub-badge">
+                  <span class="sparkle-icon">✨</span>
+                  <span class="badge-brand" id="mobBrandBadge">Gemini 3.8 Live</span>
+                  <div class="mob-sub-wave" id="mobMapSoundWave" title="音频跳动指示">
+                    <span class="bar b1"></span>
+                    <span class="bar b2"></span>
+                    <span class="bar b3"></span>
+                    <span class="bar b4"></span>
+                    <span class="bar b5"></span>
+                  </div>
+                </div>
+                <button class="mob-sub-close" id="btnMobCloseSub" title="收起字幕">✕</button>
+              </div>
+              <div class="mob-sub-user hidden" id="mobMapUserSpeech"></div>
+              <div class="mob-sub-text" id="mobMapSubtitleText">正在收听 · 随时对话…</div>
+              <!-- 手机端免输入推荐选项按键挂载区 -->
+              <div class="rec-options-container hidden" id="recOptionsMapMobile"></div>
+            </div>
+          </div>
+
+          <!-- 手机底部路线与出行方式选择面板 (选择后才开始导航) -->
+          <div id="mobRoutePickerSheet" class="mob-route-picker hidden">
+            <div class="mob-picker-header">
+              <div class="mob-picker-title" id="mobPickerTitle">推荐出行方式</div>
+              <button id="btnMobClosePicker" class="mob-btn-close-picker">✕</button>
+            </div>
+            <!-- 手机端起点与终点微卡片 -->
+            <div class="mob-od-summary">
+              <div class="mob-od-item">
+                <span class="mob-od-dot green"></span>
+                <span class="mob-od-label">起点:</span>
+                <span class="mob-od-val" id="mobOriginTitle">乌节地铁站 2号口 (ION Orchard)</span>
+              </div>
+              <div class="mob-od-item">
+                <span class="mob-od-dot red"></span>
+                <span class="mob-od-label">目的地:</span>
+                <span class="mob-od-val" id="mobDestSubtitleInline">目的地名称</span>
+              </div>
+            </div>
+            <div class="mob-mode-selector">
+              <button class="mob-mode-pill active" id="mobPillDriving" data-mode="DRIVING">
+                <span>🚗 开车</span>
+                <b id="mobEtaDriving">计算中…</b>
+              </button>
+              <button class="mob-mode-pill" id="mobPillBicycling" data-mode="BICYCLING">
+                <span>🚲 骑行</span>
+                <b id="mobEtaBicycling">计算中…</b>
+              </button>
+              <button class="mob-mode-pill" id="mobPillWalking" data-mode="WALKING">
+                <span>🚶 步行</span>
+                <b id="mobEtaWalking">计算中…</b>
+              </button>
+            </div>
+            <div class="mob-alt-routes" id="mobAltRoutesSelector">
+              <div class="mob-alt-label">方案选择：</div>
+              <div class="mob-alt-pills" id="mobAltRoutesList"></div>
+            </div>
+            <button id="btnMobStartNav" class="mob-btn-start-nav">
+              <span>▶ 开始导航</span>
+            </button>
+          </div>
+
+          <!-- 手机底部巡航状态与倍速控制栏 -->
+          <div class="mobile-bottom-bar hidden" id="mobNavBottomBar">
+            <div class="mob-info-col">
+              <div class="mob-info-dest">
+                <span id="mobDestTitle">未设定目的地</span>
+                <span class="mob-mode-badge" id="mobModeTag" style="font-size: 11px; background: rgba(26,115,232,0.12); color: #1a73e8; padding: 2px 6px; border-radius: 6px; font-weight: 600; margin-left: 6px;">🚗 开车</span>
+              </div>
+              <div class="mob-stats-row">
+                <div><strong id="mobEtaTime">--</strong> 分钟</div>
+                <div><strong id="mobDistVal">--</strong> 公里</div>
+              </div>
+              <div class="mob-speed-row">
+                <span class="mob-speed-label">⚡ 加速:</span>
+                <button class="mob-speed-btn active" data-speed="1">1x</button>
+                <button class="mob-speed-btn" data-speed="5">5x</button>
+                <button class="mob-speed-btn" data-speed="20">20x</button>
+                <button class="mob-speed-btn mob-speed-instant" data-speed="instant" title="直达终点">⏭️ 直达</button>
+              </div>
+            </div>
+            <div class="mob-ctrl-btns">
+              <button id="btnMobPause" class="mob-btn-pause" title="暂停/继续巡航">⏸️ 暂停</button>
+              <button id="btnMobCancel" class="mob-btn-cancel" title="退出导航">✕ 结束</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 2. 手机纯语音助手主视窗 (按需调度) -->
+        <div id="mobAssistantContainer" class="mob-view-panel hidden">
+          <div class="mob-assistant-panel">
+            <!-- 动态按需调度徽章条 -->
+            <div class="mob-ondemand-banner" id="mobOndemandBanner">
+              <div class="mob-banner-top">
+                <span class="badge-dot">⚡</span>
+                <span class="badge-txt">智能按需工具调度引擎</span>
+              </div>
+              <div class="mob-tool-chips" id="mobToolChips">
+                <span class="mob-tool-chip active" id="mobChipNative">🧠 原生推理</span>
+                <span class="mob-tool-chip" id="mobChipSearch">🌐 搜索 (按需)</span>
+                <span class="mob-tool-chip" id="mobChipMaps">🗺️ 地图 (按需)</span>
+                <span class="mob-tool-chip" id="mobChipFc">⚡ 导航 (按需)</span>
+              </div>
+            </div>
+
+            <div class="mob-soundwave-wrap">
+              <div class="mob-soundwave-circle" id="mobAura">
+                <div class="wave-ring r1"></div>
+                <div class="wave-ring r2"></div>
+                <div class="wave-ring r3"></div>
+                <span class="aura-icon">✨</span>
+              </div>
+              <div class="mob-soundwave-state" id="mobAssistantState">Gemini 3.8 Live 待命中 · 点击下方按钮说话</div>
+            </div>
+
+            <!-- 手机助手对话记录流 -->
+            <div class="mob-chat-stream" id="mobChatStream">
+              <div class="mob-msg-bubble user hidden" id="mobUserBubble"></div>
+              <div class="mob-msg-bubble model" id="mobModelBubble">您好！我是您的 Gemini 智能助手。无论是日常闲聊、哲学问答、查询实时天气，还是探索本地美食并一键导航，我都能按需为您提供最佳支持！</div>
+              <!-- 手机端免输入推荐选项按键 -->
+              <div id="recOptionsMobile" class="rec-options-container hidden"></div>
+            </div>
+
+            <!-- 手机助手精选快捷问答 (涵盖原生闲聊、搜索、地图、导航四类按需调用) -->
+            <div class="mob-suggest-questions">
+              <div class="suggest-title">💡 试试体验按需能力：</div>
+              <div class="suggest-pills">
+                <button class="suggest-pill" data-q="用幽默的语气讲一个程序员和AI结对编程的冷笑话">🧠 幽默冷笑话 (纯原生推理)</button>
+                <button class="suggest-pill" data-q="新加坡今天天气怎么样？适合户外散步吗？">🌦️ 查今天天气 (按需搜索)</button>
+                <button class="suggest-pill" data-q="推荐乌节路周边 3 家特色南洋美食餐厅">🍲 探索本地美食 (按需地图)</button>
+                <button class="suggest-pill" data-q="带我去滨海湾花园，规划路线并开始导航">🗺️ 导航去滨海湾 (按需函数)</button>
+              </div>
+            </div>
+
+            <!-- 手机助手底部对讲大按钮 -->
+            <div class="mob-talk-bar">
+              <button id="btnMobTalk" class="mob-big-mic-btn" title="点击说话">
+                <span class="big-mic-icon">🎙️</span>
+                <span class="big-mic-label" id="mobTalkLabel">点击语音说话</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- AR 智能眼镜 HUD 模拟层 (全功能自包含 + 双目 AR 视觉) -->
+<div id="viewGlassesOverlay" class="device-overlay hidden">
+  <div class="glasses-wrapper">
+    <!-- 眼镜顶部控制栏 (位置选择 / 模式切换 / 语音对讲) -->
+    <div class="glasses-top-strip">
+      <div class="glasses-city-selector">
+        <span class="glasses-strip-label">📍 地理位置:</span>
+        <button class="g-city-pill active" data-city="sg">🇸🇬 新加坡</button>
+        <button class="g-city-pill" data-city="sf">🇺🇸 旧金山</button>
+        <button class="g-city-pill" data-city="tyo">🇯🇵 东京</button>
+        <button class="g-city-pill" data-city="par">🇫🇷 巴黎</button>
+        <button class="g-city-pill" data-city="gps">📍 GPS</button>
+      </div>
+      <div class="glasses-mode-switcher">
+        <button class="glasses-mode-pill active" id="gTabNav">🗺️ AR 实景导航</button>
+        <button class="glasses-mode-pill" id="gTabVoice">🎙️ AR 语音助手</button>
+      </div>
+      <div class="glasses-mic-trigger">
+        <button id="gBtnMic" class="glasses-mic-btn" title="镜腿触控语音对讲">
+          <span class="g-mic-icon">🎙️</span>
+          <span>镜腿触控语音</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- 眼镜双目框架 -->
+    <div class="glasses-hud-box glasses-lens-container">
+      <!-- 左目镜: AI 空间视觉透视 / 车道感知网格 / 空间目标定位 -->
+      <div class="glasses-lens glass-lens left glass-left">
+        <div class="lens-canvas">
+          <div class="hud-header">
+            <span class="hud-mono">AI VISION · SPATIAL AR FPV</span>
+            <span class="hud-status-dot">LIVE CAMERA 60FPS</span>
+          </div>
+
+          <!-- 模拟三维车道与目标检测网格 -->
+          <div class="ar-vision-viewport">
+            <div class="ar-horizon-line"></div>
+            <div class="ar-ground-grid"></div>
+            <div class="ar-target-box" id="arTargetBox">
+              <span class="target-corner tl"></span>
+              <span class="target-corner tr"></span>
+              <span class="target-corner bl"></span>
+              <span class="target-corner br"></span>
+              <div class="target-tag">
+                <span class="tag-title" id="arTargetTitle">[+] 滨海湾花园</span>
+                <span class="tag-dist" id="arTargetDist">775 m</span>
+              </div>
+            </div>
+            <div class="ar-lane-arrow">⬆ 沿当前路段行驶</div>
+            <div class="ar-poi-marker" id="arTrafficLight">
+              <span class="poi-dot"></span>
+              <span class="poi-name">交通感知: 绿灯通行</span>
+            </div>
+          </div>
+
+          <div class="hud-footer">
+            <span>GPS FIX: 14 SATS</span>
+            <span>AI PERCEPTION: TARGET LOCKED</span>
+            <span>DEPTH: 3D SLAM ACTIVE</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 右目镜: HUD 导航指示 / AR 语音助手 (双模式按需切换) -->
+      <div class="glasses-lens glass-lens right glass-right">
+        <div class="lens-canvas">
+          <!-- 模式 A: AR 实景导航指示 (右镜) -->
+          <div id="hudNavRightContent" class="hud-subview">
+            <div class="hud-header">
+              <span class="hud-mono" id="hudNavModelLabel">GEMINI 3.8 LIVE · <b id="hudNavModeLabel">🚗 CAR HUD</b></span>
+              <span class="hud-clock" id="hudClock">12:00</span>
+            </div>
+
+            <div class="hud-nav-block">
+              <div class="hud-turn-symbol" id="hudTurnIcon">⬆️</div>
+              <div class="hud-turn-text">
+                <div class="hud-turn-instruction" id="hudTurnInstruction">READY</div>
+                <div class="hud-turn-sub" id="hudTurnSub">等待导航规划…</div>
+              </div>
+            </div>
+
+            <div class="hud-metrics">
+              <div>SPD: <span id="hudSpeed">0</span> km/h</div>
+              <div>REMAIN: <span id="hudRemainDist">--</span> km</div>
+              <div>ETA: <span id="hudEta">--</span> min</div>
+            </div>
+
+            <div class="hud-map-pip">
+              <div id="mapGlasses" class="hud-pip-canvas"></div>
+            </div>
+
+            <div class="hud-subtitles" id="hudTranscript">Gemini 3.8 语音智能监听中…</div>
+          </div>
+
+          <!-- 模式 B: AR 语音助手交互界面 (右镜 · 动态按需调度) -->
+          <div id="hudChatRightContent" class="hud-subview hidden">
+            <div class="hud-header">
+              <span class="hud-mono" id="hudHeaderModelLabel">GEMINI 3.8 · AR VOICE ASSISTANT</span>
+              <span class="hud-clock">ACTIVE</span>
+            </div>
+
+            <!-- AR 动态按需调度指示条 -->
+            <div class="hud-ondemand-strip" id="hudOndemandStrip">
+              <span class="strip-label">DISPATCH:</span>
+              <span class="hud-badge active" id="hudBadgeNative">🧠 LLM</span>
+              <span class="hud-badge" id="hudBadgeSearch">🌐 SEARCH</span>
+              <span class="hud-badge" id="hudBadgeMaps">🗺️ MAPS</span>
+              <span class="hud-badge" id="hudBadgeFc">⚡ NAV_FC</span>
+            </div>
+
+            <!-- AR 全息音频频谱动效 -->
+            <div class="hud-spectrum-box">
+              <div class="spectrum-bars">
+                <span class="bar b1"></span><span class="bar b2"></span><span class="bar b3"></span>
+                <span class="bar b4"></span><span class="bar b5"></span><span class="bar b6"></span>
+                <span class="bar b7"></span><span class="bar b8"></span><span class="bar b9"></span>
+              </div>
+              <div class="hud-assistant-status">✨ 全息语音双工对讲中 (按需调度)</div>
+            </div>
+
+            <!-- AR 全息字幕对话流 -->
+            <div class="hud-chat-dialogue">
+              <div class="hud-dialogue-line user" id="hudUserLine">“问 Gemini: 讲个程序员冷笑话”</div>
+              <div class="hud-dialogue-line model" id="hudModelLine">为什么程序员总是分不清万圣节和圣诞节？因为 Oct 31 == Dec 25！随时问我各种问题吧。</div>
+              <div id="recOptionsGlasses" class="rec-options-container hidden"></div>
+            </div>
+
+            <!-- 镜腿触控快捷语音芯片 -->
+            <div class="hud-voice-chips">
+              <span class="chips-title">VOICE PROMPTS:</span>
+              <div class="chips-flex">
+                <button class="hud-assistant-chip" data-q="讲一个关于程序员和AI的幽默冷笑话">🧠 幽默笑话</button>
+                <button class="hud-assistant-chip" data-q="查询今天实时天气状况">🌤️ 天气</button>
+                <button class="hud-assistant-chip" data-q="推荐附近南洋特色美食餐厅">🍲 美食</button>
+                <button class="hud-assistant-chip" data-q="带我去滨海湾花园，开始导航">🗺️ 导航</button>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 专属全屏纯语音助手工作台 (第四种独立交互形态 · 全能力按需调度) -->
+<!-- 专属全屏纯语音助手工作台 (全新极简深邃极光设计 · 专为高效 Demo 打造) -->
+<div id="viewAssistantOverlay" class="device-overlay hidden">
+  <div class="assistant-workbench">
+    <!-- 顶部极简状态栏：品牌 + 灵动微徽章 + 关闭返回 -->
+    <div class="ast-header-bar">
+      <div class="ast-brand">
+        <svg class="ast-google-logo" viewBox="0 0 24 24" width="20" height="20">
+          <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.66-5.17 3.66-9.17z"/>
+          <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.33 24 12 24z"/>
+          <path fill="#FBBC05" d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.25C.45 8.18 0 9.99 0 12s.45 3.82 1.25 5.42l4.03-3.15z"/>
+          <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"/>
+        </svg>
+        <span class="ast-logo-sparkle">✦</span>
+        <div class="ast-model-selector-wrap" title="切换当前助手模型">
+          <select id="astModelSelect" class="ast-model-select" title="切换当前助手模型">
+            <option value="models/gemini-3.8-live" selected>Gemini 3.8 Live (低延迟)</option>
+            <option value="models/gemini-3.8-live-extended-thinking">Gemini 3.8 Live Thinking (深度思考)</option>
+            <option value="models/gemini-3.1-flash-live-preview">Gemini 3.1 Flash Live (经典)</option>
+          </select>
+          <span class="ast-model-arrow">▾</span>
+        </div>
+        <span class="ast-live-pill"><span class="ast-live-dot"></span> LIVE</span>
+      </div>
+      
+      <div class="ast-ondemand-indicators" id="astBannerChips">
+        <span class="ast-chip active" id="astChipNative">🧠 原生推理</span>
+        <span class="ast-chip" id="astChipSearch">🌐 搜索接地</span>
+        <span class="ast-chip" id="astChipMaps">🗺️ 地图接地</span>
+        <span class="ast-chip" id="astChipFc">⚡ 导航调用</span>
+      </div>
+      
+      <button class="ast-close-btn" id="btnAstClose" title="返回全景地图">✕</button>
+    </div>
+
+    <!-- 核心视觉中心：炫彩动态极光光球 (Living Aurora Orb) -->
+    <div class="ast-hero-stage">
+      <div class="ast-orb-wrapper" id="astMainHalo">
+        <div class="ast-aurora-glow"></div>
+        <div class="ast-orb-pulse p1"></div>
+        <div class="ast-orb-pulse p2"></div>
+        <div class="ast-orb-pulse p3"></div>
+        <div class="ast-core-orb">
+          <span class="ast-orb-icon">✨</span>
+        </div>
+      </div>
+      <div class="ast-orb-status" id="astListeningText">正在收听 · 随时与 Gemini 自然对话</div>
+    </div>
+
+    <!-- 对话舞台 (支持流式文本 + 智能免输入选项按键) -->
+    <div class="ast-chat-stage" id="astDialogueCard">
+      <div class="ast-user-bubble hidden" id="astUserBubble"></div>
+      <div class="ast-model-bubble" id="astModelBubble">
+        您好！我是您的 Gemini 智能出行助手。您可以点击下方麦克风与我直接语音交流，或点击下方的快捷演示场景。当为您推荐地点时，将自动生成直达按键，点击即可秒级开启导航！
+      </div>
+      <!-- 核心：免输入选项按键挂载区 -->
+      <div class="rec-options-container hidden" id="recOptionsAssistant"></div>
+      <!-- 微型遥测注脚 -->
+      <div class="ast-micro-telemetry hidden" id="astTelemetryPill">
+        <span id="astTelType">🧠 原生大模型推理</span> · <span id="astTelDetail">未产生外部工具与接地开销 (毫秒级响应)</span>
+      </div>
+    </div>
+
+    <!-- 精致灵动的快捷演示胶囊栏 (取代原先笨重的 6 个大卡片！) -->
+    <div class="ast-quick-demo-section">
+      <div class="ast-quick-label">⚡ 快捷演示场景 (点击一键体验按需调用)：</div>
+      <div class="ast-demo-capsules" id="astDemoCapsules">
+        <button class="ast-capsule" data-prompt="请用幽默风趣的语气讲一个程序员和人工智能结对编程的冷笑话">
+          <span class="cap-icon">🧠</span>
+          <span class="cap-name">幽默冷笑话</span>
+          <span class="cap-tag native">原生 0开销</span>
+        </button>
+        <button class="ast-capsule" data-prompt="帮我把'请问附近最近的地铁站在哪里？走路需要多久？'翻译成地道的法语和日语">
+          <span class="cap-icon">🌍</span>
+          <span class="cap-name">口语实时翻译</span>
+          <span class="cap-tag native">原生推理</span>
+        </button>
+        <button class="ast-capsule" data-prompt="今天新加坡天气怎么样？气温多高？适合在滨海湾户外游玩吗？">
+          <span class="cap-icon">🌦️</span>
+          <span class="cap-name">实时天气资讯</span>
+          <span class="cap-tag search">Search 接地</span>
+        </button>
+        <button class="ast-capsule" data-prompt="帮我找乌节路附近一家评价高的精品咖啡店，规划路线带我过去。">
+          <span class="cap-icon">☕</span>
+          <span class="cap-name">乌节路精品咖啡</span>
+          <span class="cap-tag maps">Maps 接地</span>
+        </button>
+        <button class="ast-capsule" data-prompt="推荐乌节路周边 3 家特色南洋美食餐厅与招牌菜">
+          <span class="cap-icon">🍲</span>
+          <span class="cap-name">南洋特色美食</span>
+          <span class="cap-tag maps">Maps 接地</span>
+        </button>
+        <button class="ast-capsule primary" data-prompt="带我去滨海湾花园，规划路线并开始导航">
+          <span class="cap-icon">🗺️</span>
+          <span class="cap-name">一键规划导航</span>
+          <span class="cap-tag fc">Function Call</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- 底部对讲与文字输入交互栏 -->
+    <div class="ast-bottom-bar">
+      <div class="ast-input-capsule">
+        <input type="text" class="ast-input-field" id="astInputText" placeholder="给 Gemini 发送消息，或点击右侧麦克风说话…" autocomplete="off">
+        <button class="ast-mic-trigger" id="astBtnMic" title="点击开始语音对讲">
+          <span class="mic-glow"></span>
+          <span class="mic-symbol">🎙️</span>
+          <span class="mic-text">语音对讲</span>
+        </button>
+        <button class="ast-send-trigger" id="astBtnSend" title="发送文字">➤</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/config"></script>
+<script src="/static/app.js?v=100"></script>
+<script src="/static/duplex.js?v=100"></script>
+</body>
+</html>

@@ -1,0 +1,33 @@
+# Environment & secrets (NEVER commit real keys)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*credentials*.json
+
+# Runtime logs & SQLite analytics databases
+server/logs/*.log
+server/logs/*.log.*
+server/logs/*.jsonl
+server/logs/*.db
+server/logs/*.db-shm
+server/logs/*.db-wal
+*.db
+*.db-shm
+*.db-wal
+
+# Python virtual environments & bytecode
+venv/
+.venv/
+server/venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS & Editor files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
