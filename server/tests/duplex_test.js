@@ -765,6 +765,42 @@ const MODEL_TEXT = "为您推荐两个打卡点：第一家是滨海湾花园，
     assert("T21 播报停止后再次点击 → 正常关闭麦克风", h.D().micOn === false && h.sentEnd());
   }
 
+  // ---------------- T22 防扬声器回声自打断回归守护（3.8 Live 大音量外放 + 闪避闭环 + 回环 AEC） ----------------
+  {
+    const h = makeHarness();
+    assert("T22a 服务端 VAD 起始灵敏度必须为 START_SENSITIVITY_LOW（防止残音触发 interrupted）",
+      h.D().setupExtras().realtimeInputConfig.automaticActivityDetection.startOfSpeechSensitivity === "START_SENSITIVITY_LOW");
+    await h.D().start("console");
+    assert("T22b 初始 echoFloor ≥ 0.01（避免首句 -41dBFS 低门限漏回声）", h.D().echoFloor >= 0.01);
+    h.set.sceneLock(true);
+    for (let i = 0; i < 6; i++) h.F.playPcm(h.pcm(200));
+    // 模拟扬声器瞬态重音：3 帧 0.06 开门并触发 -18dB 闪避后，回声立即跌落至 0.008 持续 6 帧（240ms < 500ms）
+    for (let i = 0; i < 3; i++) h.pushFrame(0.06);
+    assert("T22c 瞬态回声触发闪避开门", h.D().gateOpen === true);
+    for (let i = 0; i < 6; i++) { h.advance(40); h.pushFrame(0.008); }
+    assert("T22c 闪避后回声骤降 → 240ms 内自动关门", h.D().gateOpen === false);
+    h.advance(400); // 跨越 hardCutAfterMs (500ms)，但因门已关，绝不能触发 localHardCut 切断外放！
+    assert("T22c 瞬态回声绝不触发本地硬切（播报不中断）", h.D().stats().hardCuts === 0 && h.g().activeAudioSources.size > 0);
+    // 2s 未收到服务端确认 → 误报回滚，回声底抬升至 0.06 * 1.2 = 0.072，突破旧版 0.035 错误封顶
+    h.advance(1600);
+    assert("T22d 误报回滚后 echoFloor 突破 0.07，后续 0.06 大音量外放回声 100% 拦截", h.D().echoFloor >= 0.07);
+    const opensBefore = h.D().stats().gateOpens;
+    for (let i = 0; i < 20; i++) h.pushFrame(0.06);
+    assert("T22d 大音量外放回声 (rms=0.06 > 0.035) 全程零开门", h.D().stats().gateOpens === opensBefore);
+    // 文字/选项/按键打断后不丢失已学到的 echoFloor
+    h.F.bargeIn("text");
+    assert("T22e bargeIn 保留已学到的 echoFloor，不清零回 0.002", h.D().echoFloor >= 0.065);
+
+    // 真实 Chromium (具备 RTCPeerConnection) 开麦瞬间即主动切换 loopback AEC 参考流
+    const hRtc = makeHarness({ rtc: true });
+    await hRtc.D().start("console");
+    await new Promise(r => setTimeout(r, 20));
+    assert("T22f Chromium 开麦即主动启用 WebRTC loopback AEC 参考通道", hRtc.F.getAudioSinkMode() === "loopback");
+    hRtc.D().stop(true);
+    await new Promise(r => setTimeout(r, 20));
+    assert("T22f 关麦后恢复 Web Audio direct 直出通道", hRtc.F.getAudioSinkMode() === "direct");
+  }
+
   console.log("\n" + passed + " passed, " + failed + " failed");
   process.exit(failed ? 1 : 0);
 })().catch(e => { console.error("HARNESS ERROR:", e); process.exit(3); });

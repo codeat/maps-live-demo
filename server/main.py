@@ -89,7 +89,7 @@ def _get_access_password() -> str:
 
 def _auth_secret(pwd: str = None) -> bytes:
     p = pwd if pwd is not None else _get_access_password()
-    return hashlib.sha256(("maps-live-auth-v1:" + p).encode("utf-8")).digest()
+    return hashlib.sha256(("maps-live-auth-v2:" + p).encode("utf-8")).digest()
 
 
 def _check_ip_lockout(ip: str) -> int:
@@ -221,7 +221,7 @@ async def login_post(request):
     lock_s = _check_ip_lockout(ip)
     if lock_s > 0:
         return web.json_response(
-            {"ok": False, "error": f"密码连续错误次数过多，当前 IP 已封禁，请 {lock_s} 秒后再试"},
+            {"ok": False, "error": "请求过于频繁，请稍后再试"},
             status=429,
         )
     try:
@@ -246,13 +246,13 @@ async def login_post(request):
     if res > 0:
         log_event("ERROR", f"密码连续错误触发 IP 封禁 ({res}s) ip={ip}", level="WARN")
         return web.json_response(
-            {"ok": False, "error": f"密码连续错误达 {AUTH_MAX_FAILS} 次，当前 IP 已封禁 15 分钟"},
+            {"ok": False, "error": "请求过于频繁，请稍后再试"},
             status=429,
         )
     remain = -res
     log_event("ERROR", f"登录密码错误 (剩余 {remain} 次机会) ip={ip}", level="WARN")
     return web.json_response(
-        {"ok": False, "error": f"访问口令错误（剩余 {remain} 次尝试机会）"},
+        {"ok": False, "error": "访问口令错误，请重试"},
         status=401,
     )
 

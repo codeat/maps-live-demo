@@ -51,27 +51,28 @@
     mime: "audio/pcm;rate=16000",
 
     // 服务端 VAD（写入 setup.realtimeInputConfig）
-    startSensitivity: "START_SENSITIVITY_HIGH", // 极速检测用户开口，120ms 内触发服务端打断 (interrupted)
+    startSensitivity: "START_SENSITIVITY_LOW", // 低起始灵敏度：屏蔽残余回声瞬态误打断，真人持续开口仍稳定触发 interrupted
     endSensitivity: "END_SENSITIVITY_HIGH",
     prefixPaddingMs: 300,             // 300ms 预拾音，防止吞字头
     silenceDurationMs: 800,           // 恢复 800ms 停顿断句，防止半句话停顿被抢答
 
     // 客户端残余回声门限（仅在扬声器出声期间生效；扬声器静默时全量直通）
     gateOpenFrames: 3,                // 连续 3 帧 (120ms) 超阈才开门
-    gateHangoverFrames: 16,           // 关门滞后 640ms，确保短词插话也能维持开门并触发硬切
+    gateHangoverFrames: 6,            // 关门滞后 240ms (< hardCutAfterMs)：外放回声在 -18dB 闪避后立即跌破门限并在 240ms 内关门，绝不误触硬切
     preRollFrames: 5,                 // 开门瞬间补发最近 200ms 真实音频（弥补开门判定延迟）
     noiseRatio: 4.0,                  // 阈值 ≥ 本底噪声 × 4  (+12 dB)
     echoRatio: 2.5,                   // 阈值 ≥ 残余回声底 × 2.5 (+8 dB)
-    absMin: 0.009,                    // 绝对下限 (≈ -41 dBFS，抑制环境微弱底噪误触)
+    absMin: 0.012,                    // 绝对下限 (≈ -38 dBFS，拦截 AEC 收敛前的首字残音)
+    maxThreshold: 0.22,               // 安全上限 (≈ -13 dBFS，既允许门限涨过外放大音量回声，又防止巨响后卡死)
     floorAlpha: 0.05,                 // 本底噪声 EMA（下行快）
     floorRiseAlpha: 0.002,            // 本底噪声 EMA（上行慢，防止把人声学进去）
     echoAlphaUp: 0.2,                 // 残余回声底 EMA（上行快）
     echoAlphaDown: 0.01,              // 残余回声底 EMA（下行慢，防止门限来回震荡）
-    speakerTailSec: 0.45,             // 最后一段音频结束后再保守 450ms 视为扬声器仍在出声（混响 + 输出/回环延迟）
+    speakerTailSec: 0.5,              // 最后一段音频结束后再保守 500ms 视为扬声器仍在出声（混响 + WebRTC 回环缓冲延迟）
 
     // 闪避与本地硬切
-    duckGain: 0.12,                   // 门一开立刻把扬声器压到 -18 dB（用户几乎听不见，但误报可无损恢复）
-    hardCutAfterMs: 250,              // 门开持续 250ms 立即本地硬切扬声器（stopAllAudioPlayback），确保即使服务端已 turnComplete 也能 0.25s 极速打断
+    duckGain: 0.12,                   // 门一开立刻把扬声器压到 -18 dB（回声随之骤降 8 倍自动关门，误报可无损恢复）
+    hardCutAfterMs: 500,              // 仅当门持续开启满 500ms（真人说话不随扬声器降音而消失）才本地硬切扬声器
     duckRestoreMs: 2000,              // 窗口内既无 interrupted 也无 inputTranscription → 误报：恢复音量并抬高回声底
 
     // 语义回声侦测
@@ -225,6 +226,16 @@
     D.scope = (typeof scope === "string") ? scope : inferScope();
     try { resumeAudioIfNeeded(); } catch (e) {}
     try { if (typeof getMasterGain === "function") getMasterGain(); } catch (e) {}   // 在用户手势内创建/恢复播放上下文（含回环通道）
+    // macOS / 桌面 Chromium 的 Web Audio 直出（playCtx.destination）并不保证进入 getUserMedia 的 WebRTC AEC 参考流；
+    // 开麦瞬间趁用户手势激活 WebRTC 本地回环通道，使第一句播报起就具备样本级 AEC 参考抵消（无 RTCPeerConnection 环境安全跳过）
+    if (isChromium() && typeof RTCPeerConnection !== "undefined" &&
+        typeof setAudioSinkMode === "function" && typeof getAudioSinkMode === "function" &&
+        getAudioSinkMode() === "direct") {
+      const explicitPref = (typeof readPref === "function") ? readPref("mlSink", "sink", "") : "";
+      if (explicitPref !== "direct") {
+        try { setAudioSinkMode("loopback"); } catch (e) {}
+      }
+    }
     try {
       if (navigator.audioSession) navigator.audioSession.type = "play-and-record";    // iOS Safari：提前锁定会话类别
     } catch (e) {}
@@ -280,7 +291,8 @@
     track.onended = () => { if (D.micOn) stop(true); };
 
     D.micOn = true; D.starting = false;
-    D.echoFloor = 0.002; D.noiseFloor = 0.001;
+    D.echoFloor = Math.max(D.echoFloor || 0, 0.01);
+    D.noiseFloor = Math.max(D.noiseFloor || 0, 0.003);
     D.gateOpen = false; D.speechRun = 0; D.preRoll = []; D.hardCutDone = false;
     D.voiceTurnOpen = false; D.turnAsr = ""; D.turnShown = false; D.turnIsEcho = false;
     const startSpeakingBusy = typeof playCtx !== "undefined" && playCtx && typeof playTime !== "undefined" && playTime > 0 && playCtx.currentTime < playTime;
@@ -318,6 +330,14 @@
     clearHold();
     D.voiceTurnOpen = false; D.turnAsr = ""; D.turnShown = false; D.turnIsEcho = false;
     duck(false);
+    if (typeof RTCPeerConnection !== "undefined" &&
+        typeof setAudioSinkMode === "function" && typeof getAudioSinkMode === "function" &&
+        getAudioSinkMode() === "loopback") {
+      const explicitPref = (typeof readPref === "function") ? readPref("mlSink", "sink", "") : "";
+      if (explicitPref !== "loopback" && !/Android/.test((navigator && navigator.userAgent) || "")) {
+        try { setAudioSinkMode("direct"); } catch (e) {}
+      }
+    }
     try { updateAllMicButtons(false); } catch (e) {}
     setState(S.OFF, true);
     try { hideVoiceToast(); } catch (e) {}
@@ -333,7 +353,6 @@
     if (D.micOn) {
       const activelySpeaking = typeof playCtx !== "undefined" && playCtx && typeof playTime !== "undefined" && playTime > 0 && playCtx.currentTime < playTime;
       if (activelySpeaking) {
-        D.echoFloor = 0.002;
         D.gateOpen = false; D.speechRun = 0; D.hardCutDone = false;
         try { if (typeof bargeIn === "function") bargeIn("mic_click"); else if (typeof stopAllAudioPlayback === "function") stopAllAudioPlayback(); } catch (e) {}
         toast("🎙️ 已打断播报 · 请直接说话", 2000);
@@ -346,7 +365,7 @@
 
   // ---------------- 每帧处理：残余回声门限 ----------------
   function threshold() {
-    return Math.min(0.035, Math.max(D.noiseFloor * CFG.noiseRatio, D.echoFloor * CFG.echoRatio, CFG.absMin));
+    return Math.min(CFG.maxThreshold, Math.max(D.noiseFloor * CFG.noiseRatio, D.echoFloor * CFG.echoRatio, CFG.absMin));
   }
   function learnEcho(rms) {
     D.echoFloor = ema(D.echoFloor, rms, rms > D.echoFloor ? CFG.echoAlphaUp : CFG.echoAlphaDown);
@@ -398,7 +417,7 @@
           if (above) D.hangover = CFG.gateHangoverFrames;
           else if (--D.hangover <= 0) closeGate();
         }
-        if (!D.hardCutDone && D.duckTimer && CFG.hardCutAfterMs > 0 &&
+        if (D.gateOpen && !D.hardCutDone && D.duckTimer && CFG.hardCutAfterMs > 0 &&
             Date.now() - D.gateOpenedAt >= CFG.hardCutAfterMs) {
           localHardCut();
         }
@@ -659,10 +678,9 @@
     log("voice user turn begin");
   }
 
-  // 文字 / 选项 / 出行方式打断（app.js 已负责掐断播放与迟到帧门），这里复位本模块的门限、闪避与轮次
+  // 文字 / 选项 / 出行方式打断（app.js 已负责掐断播放与迟到帧门），这里复位本模块的门限、闪避与轮次（保留已学到的 echoFloor 防回声回归）
   D.bargeIn = function (reason) {
     D.bargeIns++;
-    D.echoFloor = 0.002;
     duck(false);
     D.gateOpen = false; D.speechRun = 0; D.hardCutDone = false;
     clearHold();
@@ -675,8 +693,8 @@
   function tick() {
     if (!D.micOn) return;
     const busy = speakerBusy();
-    // 本地硬切：门开持续 hardCutAfterMs 且服务端尚未确认（duckTimer 仍在）→ 掐断
-    if ((D.gateOpen || D.duckTimer) && !D.hardCutDone && D.duckTimer && CFG.hardCutAfterMs > 0 &&
+    // 本地硬切：仅当门仍处于开启态持续满 hardCutAfterMs 且服务端尚未确认（duckTimer 仍在）→ 掐断
+    if (D.gateOpen && !D.hardCutDone && D.duckTimer && CFG.hardCutAfterMs > 0 &&
         busy && Date.now() - D.gateOpenedAt >= CFG.hardCutAfterMs) {
       localHardCut();
     }
