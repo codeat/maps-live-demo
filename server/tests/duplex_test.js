@@ -902,11 +902,30 @@ const MODEL_TEXT = "为您推荐两个打卡点：第一家是滨海湾花园，
       hRace.calls.userBroadcasts.at(-1) === "那有粤菜吗？",
       "sources=" + hRace.g().activeAudioSources.size + " model=" + hRace.g().currentModelTranscript + " user=" + JSON.stringify(hRace.calls.userBroadcasts));
 
-    // T23d: 静态配置核验：锁定中文 cmn-CN 防西语幻觉 + 500ms 极速静音断句 + 禁止口播“推荐选项”尾巴
-    assert("T23d setup 锁定 speechConfig.languageCode = cmn-CN 且 VAD silenceDurationMs ≤ 550ms",
+    // T23d: 静态配置核验：锁定中文 cmn-CN 防西语幻觉 + 500ms 极速静音断句 + 5帧(200ms)净音预卷防外放残响污染句首
+    assert("T23d setup 锁定 speechConfig.languageCode = cmn-CN 且 VAD silenceDurationMs ≤ 550ms 且 preRollFrames === 5",
       /speechConfig:\s*\{\s*languageCode:\s*"cmn-CN"\s*\}/.test(appSrc) &&
       hRace.D().CFG.silenceDurationMs <= 550 &&
-      hRace.D().CFG.preRollFrames >= 15);
+      hRace.D().CFG.preRollFrames === 5);
+
+    // T24: 根治“在模型说话时打断首词必错（西班牙菜有吗→芝麻油菜有吗）”声学双凶（v109）：
+    //   1) 播报期间开口前 2s 的纯外放帧在 preRoll 中必须被压制 -20dB (0.1x)，绝不把模型自己的外放语音原幅拼进用户句首；
+    //   2) 用户开口第 4 帧（160ms，postDuckSpeech >= 1）立即触发 localHardCut() 彻底切断扬声器（无需再等 500ms），让后续语音在 0 外放干扰下纯净采集！
+    const hCut = makeHarness();
+    await hCut.D().start("console");
+    hCut.set.sceneLock(true);
+    hCut.F.playPcm(hCut.pcm(3000));
+    // 先推送 10 帧模型外放残音（rms=0.005，active=false）
+    for (let i = 0; i < 10; i++) hCut.pushFrame(0.005);
+    assert("T24a 外放残音期间扬声器仍在播且门未开", hCut.g().activeAudioSources.size === 1 && hCut.D().gateOpen === false);
+    // 用户开口说“西班牙菜有吗”：前 3 帧 (120ms) 开门 + 闪避，第 4 帧 (160ms) 确认延续立即 100% 切断扬声器！
+    hCut.pushFrame(0.04);
+    hCut.pushFrame(0.04);
+    hCut.pushFrame(0.04);
+    assert("T24b 第 3 帧 (120ms) 开门并闪避外放", hCut.D().gateOpen === true);
+    hCut.pushFrame(0.035);
+    assert("T24c 第 4 帧 (160ms) postDuckSpeech>=1 立即触发 localHardCut 彻底切断扬声器 (activeAudioSources=0)，无需苦等 500ms",
+      hCut.D().hardCutDone === true && hCut.g().activeAudioSources.size === 0);
   }
 
   console.log("\n" + passed + " passed, " + failed + " failed");

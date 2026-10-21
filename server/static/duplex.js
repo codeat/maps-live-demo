@@ -53,13 +53,13 @@
     // 服务端 VAD（写入 setup.realtimeInputConfig）
     startSensitivity: "START_SENSITIVITY_LOW", // 低起始灵敏度：屏蔽残余回声瞬态误打断，真人持续开口仍稳定触发 interrupted
     endSensitivity: "END_SENSITIVITY_HIGH",
-    prefixPaddingMs: 500,             // 500ms 服务端前置填充，确保句首辅音/轻读字（“那/有/肉”）完整纳入识别窗
+    prefixPaddingMs: 300,             // 300ms 服务端前置填充，配合 200ms 净音预卷完整保留字头且不混入开口前外放语音
     silenceDurationMs: 500,           // 500ms 停顿断句，兼顾自然换气与毫秒级极速响应（每轮立省 300ms 等待）
 
     // 客户端残余回声门限（仅在扬声器出声期间生效；扬声器静默时全量直通）
     gateOpenFrames: 3,                // 连续 3 帧 (120ms) 超阈立即开门
     gateHangoverFrames: 16,           // 施密特迟滞保持 640ms 不断字（彻底保护句中换气与清辅音谷值，严禁切碎句子）
-    preRollFrames: 20,                // 开门瞬间完整补发前 800ms 原始 PCM（100% 保留句首轻读字头如“有没有/附近”，零吞字）
+    preRollFrames: 5,                 // 开门瞬间仅补发最近 200ms (5帧)，并对起音前纯外放残音帧做 -20dB 压制（杜绝把开口前模型外放塞进用户句首！）
     noiseRatio: 4.0,                  // 开门阈值 ≥ 本底噪声 × 4  (+12 dB)
     echoRatio: 2.0,                   // 开门阈值 ≥ 残余回声底 × 2.0 (+6 dB)
     absMin: 0.012,                    // 开门绝对下限 (拦截稳态外放残音，放行轻声人声)
@@ -393,11 +393,11 @@
         if (!D.gateOpen) {
           D.speechRun = above ? D.speechRun + 1 : 0;
           // 双讲破门保护：WebRTC AEC 在扬声器大声播报同时人声开口（Double-Talk）时常把人声压低到 0.011~0.040；
-          // 真人说话连续 ≥4 帧（160ms）稳定高于 max(0.011, noiseFloor×3.5) 即自适应开门，并配合 800ms preRoll 完整补齐字头
+          // 真人说话连续 ≥3 帧（120ms）稳定高于 max(0.011, noiseFloor×3.5) 即自适应开门，配合 200ms 净音预卷完整保留字头
           const dtSustained = !above && rms >= Math.max(0.011, D.noiseFloor * 3.5);
           D.dtRun = dtSustained ? D.dtRun + 1 : 0;
-          if (D.speechRun >= CFG.gateOpenFrames || D.dtRun >= 4) {
-            if (D.dtRun >= 4) D.echoFloor = Math.min(D.echoFloor, rms * 0.75);
+          if (D.speechRun >= CFG.gateOpenFrames || D.dtRun >= 3) {
+            if (D.dtRun >= 3) D.echoFloor = Math.min(D.echoFloor, rms * 0.75);
             D.dtRun = 0;
             openGate(rms, thr);
           } else {
@@ -416,6 +416,11 @@
             D.postDuckSpeech = (D.postDuckSpeech || 0) + 1;
             D.postDuckQuiet = 0;
             D.hangover = CFG.gateHangoverFrames;
+            // 160ms 极速硬切扬声器：开门已将外放闪避 -18dB，紧接着下一帧（+40ms，距开口仅 160ms）人声仍高于 holdThr → 100% 确认为真人打断！
+            // 立即调用 localHardCut() 彻底切断扬声器播放，杜绝前 500ms 外放混音与 WebRTC AEC 双讲频谱削波把“西班牙”扭曲成“芝麻油”！
+            if (!D.hardCutDone && D.duckTimer && D.postDuckSpeech >= 1) {
+              localHardCut();
+            }
           } else {
             D.postDuckQuiet = (D.postDuckQuiet || 0) + 1;
             // 若开门闪避 (-18dB) 后从未出现人声延续帧（postDuckSpeech===0）且连续 6 帧 (240ms) ≤0.011：判定为纯外放瞬态回声，立即关门防误触硬切；
@@ -432,11 +437,17 @@
     } else {
       // 扬声器静默：全量直通，由服务端 VAD 全权判定；同时学习本底噪声
       D.gateOpen = false; D.speechRun = 0;
+      if (D.hardCutDone && D.duckTimer && rms > Math.max(D.noiseFloor * 3.0, CFG.holdMin || 0.011)) {
+        // 扬声器已由 localHardCut 彻底切断并进入静默期，此时仍持续检测到人声能量 → 100% 物理确认为真人说话，撤销 2s 误报回滚计时并复位主音量
+        confirmBargeIn("post_cut_speech");
+        duck(false);
+        D.hardCutDone = false;
+      }
       learnNoise(rms);
     }
 
     if (!forward) {
-      D.preRoll.push(msg.pcm);
+      D.preRoll.push({ pcm: msg.pcm, active: (D.speechRun > 0 || D.dtRun > 0) });
       if (D.preRoll.length > CFG.preRollFrames) D.preRoll.shift();
       D.framesGated++;
       sendAudioB64(SILENCE_B64);
@@ -447,8 +458,35 @@
     sendAudioB64(b64(msg.pcm));
   }
 
+  function attenuateEchoBuffer(buf, gain) {
+    try {
+      const src = new Int16Array(buf);
+      const out = new Int16Array(src.length);
+      for (let i = 0; i < src.length; i++) {
+        let v = Math.round(src[i] * gain);
+        if (v === 0 && src[i] !== 0) v = src[i] > 0 ? 1 : -1;
+        out[i] = v;
+      }
+      return out.buffer;
+    } catch (e) { return buf; }
+  }
+
   function flushPreRoll() {
-    for (const buf of D.preRoll) { sendAudioB64(b64(buf)); D.framesSent++; }
+    const n = D.preRoll.length;
+    let firstActive = n;
+    for (let i = 0; i < n; i++) {
+      if (D.preRoll[i] && D.preRoll[i].active) { firstActive = i; break; }
+    }
+    // 仅保留人声起音前 1 帧 (40ms) 辅音前导 + 全部人声起音帧 (active=true) 原幅上行；
+    // 更早的纯外放残音帧衰减 -20dB (0.1x)，彻底杜绝把开口前扬声器里的模型语音拼进用户句首！
+    const cleanStart = Math.max(0, firstActive - 1);
+    for (let i = 0; i < n; i++) {
+      const item = D.preRoll[i];
+      const rawBuf = (item && item.pcm) ? item.pcm : item;
+      const outBuf = (i < cleanStart) ? attenuateEchoBuffer(rawBuf, 0.1) : rawBuf;
+      sendAudioB64(b64(outBuf));
+      D.framesSent++;
+    }
     D.preRoll.length = 0;
   }
 
@@ -474,7 +512,7 @@
     const t = playCtx.currentTime;
     try {
       g.gain.cancelScheduledValues(t);
-      g.gain.setTargetAtTime(on ? CFG.duckGain : 1, t, on ? 0.02 : 0.05);
+      g.gain.setTargetAtTime(on ? CFG.duckGain : 1, t, on ? 0.005 : 0.05);
     } catch (e) {}
   }
   // 服务端确认了这是真人插话（interrupted 或 inputTranscription 到达）：撤销误报计时，不再回滚
@@ -690,7 +728,7 @@
     try { if (typeof lastRenderedOptionsKey !== "undefined") lastRenderedOptionsKey = ""; } catch (e) {}
     try { resetDispatchState(); } catch (e) {}
     try { stopAllAudioPlayback(); } catch (e) {}
-    if (el("modelBubble")) el("modelBubble").textContent = "正在收听…";
+    if (el("modelBubble")) el("modelBubble").textContent = "正在思考与实时检索中…";
     try { sceneLock = true; } catch (e) {}
     log("voice user turn begin");
   }
