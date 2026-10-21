@@ -58,12 +58,12 @@
 
     // 客户端残余回声门限（仅在扬声器出声期间生效；扬声器静默时全量直通）
     gateOpenFrames: 3,                // 连续 3 帧 (120ms) 超阈才开门
-    gateHangoverFrames: 6,            // 关门滞后 240ms (< hardCutAfterMs)：外放回声在 -18dB 闪避后立即跌破门限并在 240ms 内关门，绝不误触硬切
+    gateHangoverFrames: 12,           // 正常说话保持 480ms 不断字（完整保留中文 x/c/q/sh 等清辅音谷值，杜绝吞辅音）
     preRollFrames: 5,                 // 开门瞬间补发最近 200ms 真实音频（弥补开门判定延迟）
     noiseRatio: 4.0,                  // 阈值 ≥ 本底噪声 × 4  (+12 dB)
-    echoRatio: 2.5,                   // 阈值 ≥ 残余回声底 × 2.5 (+8 dB)
-    absMin: 0.036,                    // 绝对下限 (≈ -28.8 dBFS，仅在扬声器发声时生效：拦截笔记本外放 + AGC 放大后的首字残音，真人正常开口 ≥0.05 稳定开门)
-    maxThreshold: 0.22,               // 安全上限 (≈ -13 dBFS，既允许门限涨过外放大音量回声，又防止巨响后卡死)
+    echoRatio: 2.2,                   // 阈值 ≥ 残余回声底 × 2.2 (+6.8 dB)
+    absMin: 0.015,                    // 绝对下限 (≈ -36.5 dBFS，拦截稳态外放残音，同时放行 WebRTC AEC 双讲压缩后的正常人声)
+    maxThreshold: 0.055,              // 门限硬上限 (≈ -25.2 dBFS，严禁门限涨过双讲人声导致怎么说话都打断不了)
     floorAlpha: 0.05,                 // 本底噪声 EMA（下行快）
     floorRiseAlpha: 0.002,            // 本底噪声 EMA（上行慢，防止把人声学进去）
     echoAlphaUp: 0.2,                 // 残余回声底 EMA（上行快）
@@ -122,9 +122,8 @@
     stream: null, ctx: null, src: null, node: null,
     aecReported: null,               // track.getSettings().echoCancellation
     // 门限状态
-    noiseFloor: 0.003, echoFloor: 0.015,
-    speechRun: 0, hangover: 0, gateOpen: false, openPeak: 0, gateOpenedAt: 0, hardCutDone: false,
-    unconfirmedInterruptTimer: null,
+    noiseFloor: 0.003, echoFloor: 0.006,
+    speechRun: 0, dtRun: 0, hangover: 0, gateOpen: false, openPeak: 0, gateOpenedAt: 0, hardCutDone: false,
     preRoll: [],
     lastSpeakerBusyTs: 0,
     // 会话 / 轮次
@@ -201,6 +200,12 @@
   // 扬声器此刻是否（可能）仍在出声：有活跃/排队的 source、模型播报中，或最后一段音频的尾巴 + 保守余量未过
   function speakerBusy() {
     if (typeof playCtx === "undefined" || !playCtx) return false;
+    // 硬件时钟自愈：Gemini 3.8 Live 每轮下发上百个微秒分片，若浏览器漏触发某一个分片的 onended，会导致 activeAudioSources / isModelSpeaking
+    // 永久卡死在 true（UI 卡在“🔊 播报中”且麦克风永远被门限拦截）。只要硬件时钟已走完所有排队音频（currentTime >= playTime + 0.1），立即回收！
+    if (typeof playTime !== "undefined" && playTime > 0 && playCtx.currentTime >= playTime + 0.1) {
+      if (typeof activeAudioSources !== "undefined" && activeAudioSources && activeAudioSources.size > 0) activeAudioSources.clear();
+      if (typeof isModelSpeaking !== "undefined" && isModelSpeaking) isModelSpeaking = false;
+    }
     if (typeof activeAudioSources !== "undefined" && activeAudioSources && activeAudioSources.size > 0) return true;
     if (typeof isModelSpeaking !== "undefined" && isModelSpeaking) return true;
     if (typeof playTime === "undefined" || !(playTime > 0)) return false;   // 从未播放过：不能把刚创建的上下文（currentTime≈0）当成“尾音未过”
@@ -317,8 +322,7 @@
     D.stream = D.ctx = D.src = D.node = null;
     if (D.tickTimer) { clearInterval(D.tickTimer); D.tickTimer = null; }
     if (D.statTimer) { clearInterval(D.statTimer); D.statTimer = null; }
-    D.gateOpen = false; D.speechRun = 0; D.preRoll = []; D.pttForce = false; D.hardCutDone = false;
-    if (D.unconfirmedInterruptTimer) { clearTimeout(D.unconfirmedInterruptTimer); D.unconfirmedInterruptTimer = null; }
+    D.gateOpen = false; D.speechRun = 0; D.dtRun = 0; D.preRoll = []; D.pttForce = false; D.hardCutDone = false;
     clearHold();
     D.voiceTurnOpen = false; D.turnAsr = ""; D.turnShown = false; D.turnIsEcho = false;
     duck(false);
@@ -360,7 +364,7 @@
   }
   function openGate(rms, thr) {
     D.gateOpen = true; D.hangover = CFG.gateHangoverFrames; D.openPeak = rms; D.gateOpens++;
-    D.gateOpenedAt = Date.now(); D.hardCutDone = false;
+    D.gateOpenedAt = Date.now(); D.hardCutDone = false; D.postDuckSpeech = 0; D.postDuckQuiet = 0;
     flushPreRoll();
     duck(true);
     log("gate OPEN rms=", rms.toFixed(4), "thr=", thr.toFixed(4));
@@ -387,19 +391,33 @@
         const above = rms > thr;
         if (!D.gateOpen) {
           D.speechRun = above ? D.speechRun + 1 : 0;
-          if (D.speechRun >= CFG.gateOpenFrames) {
+          // 双讲破门保护：WebRTC AEC 在扬声器大声播报同时人声开口（Double-Talk）时常把人声压低到 0.018~0.045；
+          // 外放残音随音节断续跳动，而真人说话连续 ≥7 帧（280ms）稳定高于 max(0.018, noiseFloor×5)，此时自适应回调虚高门限并开门
+          const dtSustained = !above && rms >= Math.max(0.018, D.noiseFloor * 5);
+          D.dtRun = dtSustained ? D.dtRun + 1 : 0;
+          if (D.speechRun >= CFG.gateOpenFrames || D.dtRun >= 7) {
+            if (D.dtRun >= 7) D.echoFloor = Math.min(D.echoFloor, rms * 0.8);
+            D.dtRun = 0;
             openGate(rms, thr);
           } else {
             // 未开门：用静音帧占位（保持上行流连续，供服务端 VAD 计时）。
-            // 只把“低于阈值”的帧学进回声底；超阈但还没凑够 3 帧的候选帧不能学——否则回声底会以 0.2 的步长追着人声涨，
-            // 门限永远追不上（v1 的门几乎只对突然的大声有效）。持续超阈的真回声由误报回滚路径（openPeak×1.2）学习。
-            if (!above) learnEcho(rms);
+            // 只把“低于阈值且非双讲候选”的帧学进回声底
+            if (!above && !dtSustained) learnEcho(rms);
             forward = false;
           }
         } else {
           if (rms > D.openPeak) D.openPeak = rms;
-          if (above) D.hangover = CFG.gateHangoverFrames;
-          else if (--D.hangover <= 0) closeGate();
+          if (above) {
+            D.postDuckSpeech = (D.postDuckSpeech || 0) + 1;
+            D.postDuckQuiet = 0;
+            D.hangover = CFG.gateHangoverFrames;
+          } else {
+            D.postDuckQuiet = (D.postDuckQuiet || 0) + 1;
+            // 若开门闪避 (-18dB) 后从未出现后续超阈帧（postDuckSpeech===0）且连续 6 帧 (240ms) 骤降：判定为纯外放瞬态回声，立即关门防误触硬切；
+            // 若已有真人连续语音帧，则完整保留 12 帧 (480ms) hangover，确保中文清辅音与句中微停顿一字不漏！
+            if ((D.postDuckSpeech || 0) === 0 && D.postDuckQuiet >= 6) closeGate();
+            else if (--D.hangover <= 0) closeGate();
+          }
         }
         if (D.gateOpen && !D.hardCutDone && D.duckTimer && CFG.hardCutAfterMs > 0 &&
             Date.now() - D.gateOpenedAt >= CFG.hardCutAfterMs) {
@@ -511,23 +529,13 @@
 
     if (sc.interrupted) {
       // 服务端确认用户插话：瞬间掐断本地已排队的全部音频（Live API 下发领先于实时，本地可能还囤着数秒）
+      // 严禁因 inputTranscription 晚到 (>1.5s) 而把用户的真人语音峰值学进 echoFloor！
       D.interrupts++;
-      const peakAtInterrupt = D.openPeak;
       confirmBargeIn("interrupted");
       try { stopAllAudioPlayback(); } catch (e) {}
       duck(false);
       D.hardCutDone = false;
       endVoiceTurn("interrupted");
-      // 自校准护栏：若大音量外放残音偶发冲破门限触发了 interrupted，但 1.5s 内未产生真实人声转写（或产生混响畸变外语幻觉如 "¿Qué tal?"），自动抬高 echoFloor 杜绝二次复发
-      if (peakAtInterrupt > 0) {
-        if (D.unconfirmedInterruptTimer) clearTimeout(D.unconfirmedInterruptTimer);
-        D.unconfirmedInterruptTimer = setTimeout(() => {
-          D.unconfirmedInterruptTimer = null;
-          D.echoFloor = Math.max(D.echoFloor, peakAtInterrupt * 1.25);
-          log("post-interrupt no human ASR → calibrated echoFloor to", D.echoFloor.toFixed(4));
-        }, 1500);
-        D._lastInterruptPeak = peakAtInterrupt;
-      }
       log("interrupted");
     }
     if (sc.turnComplete) {
@@ -568,10 +576,6 @@
     if (!chunk) return;
     const now = Date.now();
     D.lastInputTs = now;
-    if (D.unconfirmedInterruptTimer && !/[¿¡À-ÿ]/.test(chunk)) {
-      clearTimeout(D.unconfirmedInterruptTimer);
-      D.unconfirmedInterruptTimer = null;
-    }
     confirmBargeIn("asr");
     if (!D.voiceTurnOpen) {
       D.voiceTurnOpen = true;

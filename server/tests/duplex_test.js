@@ -765,13 +765,14 @@ const MODEL_TEXT = "为您推荐两个打卡点：第一家是滨海湾花园，
     assert("T21 播报停止后再次点击 → 正常关闭麦克风", h.D().micOn === false && h.sentEnd());
   }
 
-  // ---------------- T22 防扬声器回声自打断回归守护（3.8 Live 大音量外放 + 闪避闭环 + 回环 AEC） ----------------
+  // ---------------- T22 防扬声器回声自打断 + 多轮双讲语音打断守护（3.8 Live） ----------------
   {
     const h = makeHarness();
     assert("T22a 服务端 VAD 起始灵敏度必须为 START_SENSITIVITY_LOW（防止残音触发 interrupted）",
       h.D().setupExtras().realtimeInputConfig.automaticActivityDetection.startOfSpeechSensitivity === "START_SENSITIVITY_LOW");
     await h.D().start("console");
-    assert("T22b 初始 echoFloor ≥ 0.01（避免首句 -41dBFS 低门限漏回声）", h.D().echoFloor >= 0.01);
+    assert("T22b 门限上下界合理（absMin ≥ 0.012 且 maxThreshold ≤ 0.06，绝不锁死双讲人声）",
+      h.D().CFG.absMin >= 0.012 && h.D().CFG.maxThreshold <= 0.06);
     h.set.sceneLock(true);
     for (let i = 0; i < 6; i++) h.F.playPcm(h.pcm(200));
     // 模拟扬声器瞬态重音：3 帧 0.06 开门并触发 -18dB 闪避后，回声立即跌落至 0.008 持续 6 帧（240ms < 500ms）
@@ -781,23 +782,43 @@ const MODEL_TEXT = "为您推荐两个打卡点：第一家是滨海湾花园，
     assert("T22c 闪避后回声骤降 → 240ms 内自动关门", h.D().gateOpen === false);
     h.advance(400); // 跨越 hardCutAfterMs (500ms)，但因门已关，绝不能触发 localHardCut 切断外放！
     assert("T22c 瞬态回声绝不触发本地硬切（播报不中断）", h.D().stats().hardCuts === 0 && h.g().activeAudioSources.size > 0);
-    // 2s 未收到服务端确认 → 误报回滚，回声底抬升至 0.06 * 1.2 = 0.072，突破旧版 0.035 错误封顶
     h.advance(1600);
-    assert("T22d 误报回滚后 echoFloor 突破 0.07，后续 0.06 大音量外放回声 100% 拦截", h.D().echoFloor >= 0.07);
-    const opensBefore = h.D().stats().gateOpens;
-    for (let i = 0; i < 20; i++) h.pushFrame(0.06);
-    assert("T22d 大音量外放回声 (rms=0.06 > 0.035) 全程零开门", h.D().stats().gateOpens === opensBefore);
-    // 文字/选项/按键打断后不丢失已学到的 echoFloor
-    h.F.bargeIn("text");
-    assert("T22e bargeIn 保留已学到的 echoFloor，不清零回 0.002", h.D().echoFloor >= 0.065);
+    // 即使 echoFloor 涨到 0.072，双讲人声（被 WebRTC AEC 压低到 rms=0.025）持续 ≥7 帧（280ms）仍必须 100% 破门打断！
+    h.F.playPcm(h.pcm(1500));
+    assert("T22d 即使 echoFloor 已升高，低振幅双讲真人语音 (rms=0.025) 持续 7 帧仍 100% 破门打断", (() => {
+      for (let i = 0; i < 7; i++) h.pushFrame(0.025);
+      return h.D().gateOpen === true;
+    })());
 
-    // 桌面 Chromium 开麦必须保持 Web Audio direct 直出（防止 Corp Chrome / VPN 下本地 RTCPeerConnection 无 UDP 导致静音）
+    // 连续 5 轮真人开口打断且 inputTranscription 均晚到 2.0s（复现线上 client #6 真实时序）：第 5 轮仍 100% 秒开门！
+    const hMulti = makeHarness();
+    await hMulti.D().start("console");
+    for (let turn = 1; turn <= 5; turn++) {
+      hMulti.set.sceneLock(true);
+      hMulti.F.playPcm(hMulti.pcm(2000));
+      for (let i = 0; i < 3; i++) hMulti.pushFrame(0.03);
+      assert("T22e 第 " + turn + " 轮正常音量语音立即开门打断", hMulti.D().gateOpen === true);
+      await hMulti.serverMsg({ serverContent: { interrupted: true } });
+      hMulti.advance(2000); // 模拟 3.8 Live 在 interrupted 后 2.0s 才下发 inputTranscription
+      await hMulti.serverMsg({ serverContent: { inputTranscription: { text: "第" + turn + "轮提问" } } });
+      await hMulti.serverMsg({ serverContent: { turnComplete: true } });
+    }
+
+    // 模拟浏览器漏触发 src.onended 导致 activeAudioSources 残留：硬件时钟走完后 speakerBusy() 必须自动自愈归零，绝不永久卡在“播报中”
+    const hStuck = makeHarness();
+    await hStuck.D().start("console");
+    hStuck.F.playPcm(hStuck.pcm(300)); // 故意不调 finishPlayback() 模拟 onended 丢失！
+    assert("T22f 播放未结束时 speakerBusy 为 true", hStuck.D().speakerBusy() === true);
+    hStuck.advance(1000);               // 时钟推过 playTime + speakerTailSec
+    assert("T22f onended 丢失但时钟已播完 → speakerBusy 自动自愈为 false，绝不永久卡死在播报中",
+      hStuck.D().speakerBusy() === false && hStuck.g().activeAudioSources.size === 0 && hStuck.g().isModelSpeaking === false);
+
+    // 桌面 Chromium 开麦保持 direct 直出；WebRTC 回环 0 收包时自动回退 direct
     const hRtc = makeHarness({ rtc: true });
     await hRtc.D().start("console");
-    assert("T22f 桌面 Chromium 开麦保持 direct 直出，不断开 playCtx.destination",
+    assert("T22g 桌面 Chromium 开麦保持 direct 直出，不断开 playCtx.destination",
       hRtc.F.getAudioSinkMode() === "direct" && hRtc.g().masterGain.connections.has(hRtc.g().playCtx.destination));
 
-    // 当真实浏览器 getStats() 显示 inbound-rtp bytesReceived=0（Corp Chrome / VPN 阻断本地 UDP）时，setAudioSinkMode("loopback") 必须回退 direct 绝不静音
     const hBlocked = makeHarness({ rtc: true });
     hBlocked.FakeRTC.prototype.getStats = async () => new Map([["r1", { type: "inbound-rtp", bytesReceived: 0 }]]);
     const fallbackPromise = hBlocked.F.setAudioSinkMode("loopback");
@@ -807,21 +828,8 @@ const MODEL_TEXT = "为您推荐两个打卡点：第一家是滨海湾花园，
     }
     const fallbackMode = await fallbackPromise;
     delete hBlocked.FakeRTC.prototype.getStats;
-    assert("T22g WebRTC 回环 0 收包时自动回退 direct，绝不断开扬声器直出",
+    assert("T22h WebRTC 回环 0 收包时自动回退 direct，绝不断开扬声器直出",
       fallbackMode === "direct" && hBlocked.g().masterGain.connections.has(hBlocked.g().playCtx.destination));
-
-    // 首句外放残音（rms=0.032）在 direct 模式下首帧即被拦截；若偶发峰值触发混响畸变外语幻觉（如 "¿Qué tal?"），1.5s 自动抬高 echoFloor
-    const hCalib = makeHarness();
-    await hCalib.D().start("console");
-    hCalib.set.sceneLock(true);
-    for (let i = 0; i < 4; i++) hCalib.F.playPcm(hCalib.pcm(200));
-    for (let i = 0; i < 10; i++) hCalib.pushFrame(0.032);
-    assert("T22h direct 模式首句笔记本残音 (rms=0.032) 全程零开门并自适应抬升 echoFloor", hCalib.D().stats().gateOpens === 0 && hCalib.D().echoFloor >= 0.028);
-    for (let i = 0; i < 3; i++) hCalib.pushFrame(0.09);
-    await hCalib.serverMsg({ serverContent: { interrupted: true } });
-    await hCalib.serverMsg({ serverContent: { inputTranscription: { text: "¿Qué tal?" } } });
-    hCalib.advance(1600);
-    assert("T22h 混响畸变伪转写 (¿Qué tal?) 触发 interrupted 后自动抬高 echoFloor ≥ 0.11", hCalib.D().echoFloor >= 0.11);
   }
 
   console.log("\n" + passed + " passed, " + failed + " failed");

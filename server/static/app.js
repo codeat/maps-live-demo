@@ -3551,6 +3551,7 @@ function playPcm(b64) {
     const bytes = new Uint8Array(safeLen);
     for (let i = 0; i < safeLen; i++) bytes[i] = raw.charCodeAt(i);
     const int16 = new Int16Array(bytes.buffer);
+    if (int16.length === 0) return;
     const float32 = new Float32Array(int16.length);
     for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
 
