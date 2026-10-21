@@ -2055,8 +2055,22 @@ const CANONICAL_LANDMARKS = [
     address: "2 Orchard Turn, #04-09/10 ION Orchard, Singapore 238801"
   },
   {
+    // 御宝至尊烤鸭店 (百丽宫 Paragon)
+    pattern: /(?:御宝至尊烤鸭店|御宝至尊烤鸭|Imperial Treasure Super Peking Duck)/i,
+    name: "御宝至尊烤鸭店 (Imperial Treasure Super Peking Duck · 百丽宫)",
+    target: { lat: 1.3039, lng: 103.8358 },
+    address: "290 Orchard Rd, #05-42/45 Paragon, Singapore 238859"
+  },
+  {
+    // 同乐经典 (义安城 Ngee Ann City)
+    pattern: /(?:同乐经典|TungLok Signatures)/i,
+    name: "同乐经典 (TungLok Signatures · 义安城)",
+    target: { lat: 1.3023, lng: 103.8347 },
+    address: "391 Orchard Rd, #04-05/06/07 Ngee Ann City, Singapore 238872"
+  },
+  {
     // 御宝轩 / 御宝阁 (ION Orchard)
-    pattern: /(?:御宝轩|御宝阁|御宝至尊烤鸭|Imperial Treasure)/i,
+    pattern: /(?:御宝轩|御宝阁|Imperial Treasure)/i,
     name: "御宝轩 (Imperial Treasure · ION Orchard)",
     target: { lat: 1.3040, lng: 103.8318 },
     address: "2 Orchard Turn, #03-05 ION Orchard, Singapore 238801"
@@ -2166,11 +2180,12 @@ function connect() {
     const regionName = currentCity.name;
     const addr = currentCity.address || "";
     const sysPrompt = `你是亲切自然、熟悉本地美食与出行的中文智能语音助手。工具含 Google Search、Google Maps 及 start_navigation。
-【一、纯正自然的普通话发音与中文化店名铁律（消除怪异腔调）】
+【一、仅限中英双语与纯正自然普通话发音铁律（彻底杜绝西语/德语等外语误回复）】
+- 【100% 中文普通话回复铁律（严禁外语回复）】：用户母语为中文，全程只会说【中文普通话】（偶有少量英语单词），【绝对不会说西班牙语、德语、法语等小语种】！除非用户明确要求翻译句子，否则你的语音与文字回复【必须 100% 使用简体中文普通话】，【绝对禁止】输出任何西班牙语（如“Sí, en los centros comerciales...”、“No hay restaurantes...”、“¿Le gustaría...?”）、德语（“Ja”）或其他外语！
 - 【字正腔圆、自然平实】：全程使用纯正、标准、温和自然的普通话（声调平稳清晰，像日常面对面朋友交谈一样自然顺耳），不加寒暄套话，每次控制在 2~3 句简短口语（约 40~70 字）。
 - 【严禁怪异网络词与儿化腔】：【绝对禁止】使用“这片儿”、“口碑王”、“超绝”、“翻牌子”、“地道好味”、“宝藏店”、“前者…后者…”、“得嘞”等生硬怪异词汇或做作腔调！
 - 【优先使用中文店名（严禁中英夹杂带偏普通话口音）】：
-  1) 凡是有中文名或通用中文译名的餐厅、商场、地标（尤其是中餐厅、新加坡/华人名店、知名连锁），在语音播报中【必须一律使用纯中文名称】！例如：必须说“珍宝海鲜”（严禁说 Jumbo Seafood）、说“御宝轩”或“御宝阁”（严禁说 Imperial Treasure）、说“乐天味之楼”（严禁说 Taste Paradise）、说“翡翠金阁”（严禁说 Crystal Jade）、说“鼎泰丰”、“莆田”、“华厅餐厅”、“夏宫”、“江南春”、“松发肉骨茶”、“亚华肉骨茶”、“发起人肉骨茶”、“巴沙咖啡”（严禁说 Bacha Coffee）、“义安城”、“百丽宫”。
+  1) 凡是有中文名或通用中文译名的餐厅、商场、地标（尤其是中餐厅、新加坡/华人名店、知名连锁），在语音播报中【必须一律使用纯中文名称】！例如：必须说“珍宝海鲜”（严禁说 Jumbo Seafood）、说“御宝轩”或“御宝至尊烤鸭店”（严禁说 Imperial Treasure）、说“同乐经典”（严禁说 TungLok Signatures）、说“乐天味之楼”（严禁说 Taste Paradise）、说“翡翠金阁”（严禁说 Crystal Jade）、说“鼎泰丰”、“莆田”、“华厅餐厅”、“夏宫”、“江南春”、“松发肉骨茶”、“亚华肉骨茶”、“发起人肉骨茶”、“巴沙咖啡”（严禁说 Bacha Coffee）、“义安城”、“百丽宫”。
   2) 即便是没有中文名的纯西餐厅（如法餐 Les Amis、Odette，西班牙菜 La Tapería），【绝对禁止】在店名后面连读英文路名或商圈后缀（例如只说“乌节路的 Merci Marcel”或“Les Amis”，严禁连读成“Merci Marcel Orchard”或“Bistro du Vin Singapore”），防止英文词汇带偏后续普通话发音！
 - 【自然变换推荐句式（相邻两轮不重复同一种开头，同时保留清晰店名供界面生成按键）】：
   推荐 2 家地点时，在以下三种平实自然的日常口语中轮换使用：
@@ -2179,7 +2194,11 @@ function connect() {
   · 表达 3（可以先去+也可以去）：“离这儿不远有两家高分好店，可以先去[店名A]，尝尝[招牌]；也可以去[店名B]，[特色]很受欢迎，去哪家我帮您导航？”
   （注意：【绝对不要】在语音末尾朗读“推荐选项：A、B”标签，界面会自动从店名提取一键导航按钮）。
 
-【二、美食/地点追问消歧与吞字容错铁律】
+【二、美食/地点追问消歧、中文地方菜系覆盖与抗外语幻觉铁律】
+- 【中文短句防外语谐音误听（“北京菜有吗”严禁当成西语“cajero”）】：
+  1) 当用户问“北京菜有吗？”（或因短音频被误听为西班牙语谐音“¿Hay un cajero?”、“cajero”）：100% 是在问附近有没有【北京菜/京味菜/北京烤鸭】（【绝对禁止】当成西班牙语 ATM 取款机！），立即用中文推荐乌节路附近的京味名店，如百丽宫的“御宝至尊烤鸭店”（招牌正宗北京片皮鸭）和义安城的“同乐经典”（招牌北京烤鸭与传统京菜）。
+  2) 当用户问“粤菜”、“那广东菜呢？”（或被误听为“Ja.”、“Hola, soy Guangdong”）：100% 是在问【粤菜/广东菜】，立即用中文推荐“御宝轩”、“华厅餐厅”、“翡翠金阁”或“夏宫”。
+  3) 当用户问“我想吃湖北菜”、“川菜”、“湘菜”、“本帮菜”等中国地方菜系：优先用中文推荐附近对应的中餐厅或风味相近的川湘/江浙名店（如百丽宫的“翡翠金阁”或义安城的“御宝轩”、“同乐经典”），【绝对禁止】用西班牙语或外语回答！
 - 【简短菜系追问 = 推荐餐厅】：在餐饮/地点探索语境下，当用户说“额，有中餐吗？”、“中餐”、“法餐吗？”、“额，有法餐吗？”、“日料呢？”，100% 是在问“附近有什么该菜系的餐厅推荐？”，必须立即检索并推荐 2 家附近该菜系高分餐厅，【严禁】当成百科名词解释！
 - 【句首吞字还原（“没有法餐” = “有没有法餐”）】：句首轻读时若被转写为“没有法餐”、“没有西餐”、“福临有没有肉骨茶”，在美食上下文中【必须】还原为“附近有没有[该菜系/食物]推荐？”，立即推荐对应餐厅。
 - 【播报打断首词抗噪与跨国菜系还原】：播报中打断若出现近音（如“芝麻油菜有吗”→“西班牙菜有吗”、“啊我在有吗”→“法国菜有吗”、“黑脸一点/和医院一点”→“可以远一点”），立即按真实意图检索推荐。
@@ -2193,7 +2212,7 @@ function connect() {
 1) 闲聊、百科、翻译、数学推理、嫌语速慢催促：【严禁】调用任何工具，0 延迟原生直答。
 2) 实时天气/新闻/门票、周边餐馆商铺查询：按需调用 Google Search / Google Maps。
 3) 明确单一目的地导航（含复合提问如“查水幕秀时间并带我去最佳观赏点”）：立即在第一时间调用 start_navigation(destination="具体店名/地标", travel_mode="DRIVING")，口语一句话确认即可。
-4) 多候选推荐（如“推荐附近好吃的 / 有中餐吗 / 有法餐吗”）：用平实自然的口语推荐 2 家高分近店并询问去哪家，【严禁】在用户选定前提前调用 start_navigation。
+4) 多候选推荐（如“推荐附近好吃的 / 有中餐吗 / 有法餐吗 / 北京菜有吗”）：用平实自然的口语推荐 2 家高分近店并询问去哪家，【严禁】在用户选定前提前调用 start_navigation。
 5) 【跟进选店零搜索秒回】：当用户说“去第一家/第二个/带我过去/走吧/直接导航”等指代上文已提过的地点时，【绝对禁止重复调用 Google Search】，直接从对话记忆锁定对应店名并在第一时间调用 start_navigation，用不超过 25 字自然确认（如“好的，马上为您规划去松发肉骨茶的路线！”）。`;
 
     // v90: 全双工引擎可用时启用服务端 VAD（开口即打断 START_OF_ACTIVITY_INTERRUPTS）+ 会话续接 + 上下文滑窗压缩；
@@ -2214,10 +2233,22 @@ function connect() {
       genConfig.thinkingConfig = { thinkingLevel: modelObj.thinkingLevel };
     }
 
+    const inputTranscriptionConfig = {
+      languageCodes: ["cmn-Hans-CN", "zh-CN", "en-US"],
+      customVocabulary: [
+        "北京菜", "粤菜", "广东菜", "湖北菜", "川菜", "湘菜", "江浙菜",
+        "本帮菜", "潮州菜", "东北菜", "福建菜", "徽菜", "鲁菜", "西北菜",
+        "新疆菜", "云南菜", "贵州菜", "台湾菜", "客家菜", "海南鸡饭",
+        "肉骨茶", "火锅", "中餐", "法餐", "西班牙菜", "意大利菜", "日料",
+        "韩餐", "泰国菜", "越南菜", "印度菜", "西餐", "北京烤鸭"
+      ]
+    };
+
     ws.send(JSON.stringify({setup: {
       model: activeModel,
       generationConfig: genConfig,
-      outputAudioTranscription: {}, inputAudioTranscription: {},
+      outputAudioTranscription: {},
+      inputAudioTranscription: inputTranscriptionConfig,
       ...(duplexOn ? window.DuplexVoice.setupExtras() : {realtimeInputConfig: {automaticActivityDetection: {disabled: true}}}),
       systemInstruction: {parts: [{text: sysPrompt}]},
       tools: modelTools
@@ -2378,14 +2409,21 @@ function connect() {
       }
     }
     if (sc.inputTranscription && sc.inputTranscription.text) {
+      window.__foreignRescueSent = false;
       if (duplexReady()) {
         // 全双工：交给引擎做语义回声侦测与短暂扣留，再由它清场 + 上屏（见 duplex.js acceptInputTranscription）。
         // 用 duplexReady 而不是 micOn：用户刚关麦时服务端仍会把已 flush 的最后一句转写下发，这一句也要按新一轮处理，
         // 不能拼接到上一条提问后面。
         window.DuplexVoice.acceptInputTranscription(sc.inputTranscription.text);
       } else {
-        currentUserTranscript += sc.inputTranscription.text;
-        broadcastUserTranscript(currentUserTranscript);
+        const rawUser = currentUserTranscript + sc.inputTranscription.text;
+        const cleanUser = (window.DuplexVoice && typeof window.DuplexVoice.sanitizeAllowedLanguageAsr === "function")
+          ? window.DuplexVoice.sanitizeAllowedLanguageAsr(rawUser)
+          : rawUser;
+        if (cleanUser) {
+          currentUserTranscript = cleanUser;
+          broadcastUserTranscript(currentUserTranscript);
+        }
       }
     }
     if (sc.outputTranscription && sc.outputTranscription.text) {
@@ -2394,6 +2432,20 @@ function connect() {
         $("modelBubble").textContent = "";
       }
       currentModelTranscript += sc.outputTranscription.text;
+      // 终极防外语自愈守卫：若主模型在非翻译场景下意外输出西班牙语/小语种，立即切断外语音频并用还原后的中文意图重发！
+      if (window.DuplexVoice && typeof window.DuplexVoice.isForeignLanguageOutput === "function" &&
+          window.DuplexVoice.isForeignLanguageOutput(currentModelTranscript) &&
+          !/翻译|怎么说|西语|西班牙语|法语|德语|日语|马来语|英语/.test(currentUserTranscript || "")) {
+        stopAllAudioPlayback();
+        currentModelTranscript = "";
+        broadcastModelTranscript("正在为您用中文检索附近餐厅…");
+        if (!window.__foreignRescueSent) {
+          window.__foreignRescueSent = true;
+          const rescueText = (window.DuplexVoice && window.DuplexVoice.rescuedForeignQuery) || currentUserTranscript || "附近有什么推荐的中餐厅？";
+          setTimeout(() => { try { sendQuery(rescueText); } catch (e) {} }, 30);
+        }
+        return;
+      }
       if (window.DuplexVoice) window.DuplexVoice.noteModelText(currentModelTranscript);
       broadcastModelTranscript(currentModelTranscript);
       tryRealtimeExtractAndRender(currentModelTranscript, sc.groundingMetadata);

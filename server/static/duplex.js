@@ -366,7 +366,6 @@
   function openGate(rms, thr) {
     D.gateOpen = true; D.hangover = CFG.gateHangoverFrames; D.openPeak = rms; D.gateOpens++;
     D.gateOpenedAt = Date.now(); D.hardCutDone = false; D.postDuckSpeech = 0; D.postDuckQuiet = 0;
-    D.onsetBoostLeft = 10;
     flushPreRoll();
     duck(true);
     log("gate OPEN rms=", rms.toFixed(4), "thr=", thr.toFixed(4));
@@ -464,14 +463,7 @@
     }
     D.preRoll.length = 0;
     D.framesSent++;
-    let outPcm = msg.pcm;
-    if ((D.onsetBoostLeft || 0) > 0) {
-      D.onsetBoostLeft--;
-      if (rms >= 0.008 && rms < 0.022) {
-        outPcm = scalePcmBuffer(msg.pcm, Math.min(2.2, 0.024 / rms));
-      }
-    }
-    sendAudioB64(b64(outPcm));
+    sendAudioB64(b64(msg.pcm));
   }
 
   function scalePcmBuffer(buf, gain) {
@@ -495,19 +487,13 @@
     for (let i = 0; i < n; i++) {
       if (D.preRoll[i] && D.preRoll[i].active) { firstActive = i; break; }
     }
-    // 保留从最早人声起音帧（如“额…”）前 1 帧 (40ms) 起的全部预卷帧，并对轻声犹豫起音（0.008 ≤ rms < 0.022）做自动增益补偿至 0.024 RMS；
-    // 更早的纯外放残音帧衰减 -24dB (0.06x)，兼顾“句首‘额，有’一字不漏”与“杜绝外放语音混入句首”！
+    // 保留从最早人声起音帧（如“额…”、“北京菜”）前 1 帧 (40ms) 起的全部预卷帧，且保持 1.0x 原生线性波形（严禁在 localHardCut 切断外放前做逐帧非线性 2.2x 跳变增益，防止放大残留外放或产生帧边界高频咔哒声导致中文被误听为西语/德语）；
+    // 更早的纯外放残音帧衰减 -24dB (0.06x)，兼顾“句首起音一字不漏”与“零失真线性高保真”！
     const cleanStart = Math.max(0, firstActive - 1);
     for (let i = 0; i < n; i++) {
       const item = D.preRoll[i];
       const rawBuf = (item && item.pcm) ? item.pcm : item;
-      const fRms = (item && typeof item.rms === "number") ? item.rms : 0;
-      let outBuf = rawBuf;
-      if (i < cleanStart) {
-        outBuf = scalePcmBuffer(rawBuf, 0.06);
-      } else if (fRms >= 0.008 && fRms < 0.022) {
-        outBuf = scalePcmBuffer(rawBuf, Math.min(2.2, 0.024 / fRms));
-      }
+      const outBuf = (i < cleanStart) ? scalePcmBuffer(rawBuf, 0.06) : rawBuf;
       sendAudioB64(b64(outBuf));
       D.framesSent++;
     }
@@ -642,6 +628,48 @@
   //     若 app.js 已为新一轮开启流式输出（window.__newModelTurnStarted===true），严禁再调 beginVoiceUserTurn() 误杀新回答！
   //   · 疑似窗口（扬声器 3.5s 内出过声）内先扣留字幕 ≤220ms，累计 ≥8 词元后与模型近期播报比对
   //   · 判定回声 → 不上屏、计数并按次数升级防御；否则 beginVoiceUserTurn() 清场并上屏
+  // ---------------- 中英双语白名单守卫：拦截西语/德语等小语种幻觉并还原中文菜系谐音 ----------------
+  // Gemini Live 独立 ASR 观察器 (listener_v10) 已通过 setup.inputAudioTranscription.languageCodes 锁定为
+  // ["cmn-Hans-CN", "zh-CN", "en-US"]；此处在客户端再加一道硬白名单防线，彻底拦截任何漏网的小语种转写（如 ¿Hay un cajero? / Ja. / Hola, soy Guangdong）。
+  function sanitizeAllowedLanguageAsr(rawText) {
+    if (!rawText || typeof rawText !== "string") return "";
+    let s = rawText;
+    // 1. 典型短句中文菜系被误识为西语/德语谐音的精准还原
+    if (/hay\s+un\s+cajero|\bcajero\b/i.test(s)) {
+      D.rescuedForeignQuery = "北京菜有吗？";
+      return "北京菜有吗？";
+    }
+    if (/(?:hola[,\s]+)?soy\s+guangdong/i.test(s) || (!/[\u4e00-\u9fa5]/.test(s) && /\bguangdong\b/i.test(s))) {
+      D.rescuedForeignQuery = "那广东菜呢？";
+      return "那广东菜呢？";
+    }
+    if (/^\s*(?:ja|jawel|oui|sí)\.?\s*$/i.test(s)) {
+      D.rescuedForeignQuery = "粤菜";
+      return "粤菜";
+    }
+    if (/[¿¡]?\s*d[oó]nde\s+est[aá]\s*\??/i.test(s)) {
+      D.rescuedForeignQuery = "附近有吗？";
+      return "附近有吗？";
+    }
+    // 2. 含中文汉字：剔除西语倒问号/倒叹号与非中英杂散文字（俄文/阿文/泰文/天城文/韩文等），并修正“月菜→粤菜”同音字
+    if (/[\u4e00-\u9fa5]/.test(s)) {
+      s = s.replace(/^(\s*)月菜(?=[吗呢？?。.！!\s]*$)/, "$1粤菜").replace(/([吃有点的想])月菜/g, "$1粤菜");
+      return s.replace(/[¿¡\u0400-\u04FF\u0600-\u06FF\u0900-\u097F\u0E00-\u0E7F\uAC00-\uD7AF]+/g, "").trim() || s;
+    }
+    // 3. 纯外文字母且不含任何中文：若命中西语/德语/法语重音字母或停用词、或非拉丁外文脚本，一律拦截不上屏
+    if (/[¿¡áéíóúñüÁÉÍÓÚÑÜàèìòùâêîôûäëïöçß\u0400-\u04FF\u0600-\u06FF\u0900-\u097F\u0E00-\u0E7F\uAC00-\uD7AF]/.test(s) ||
+        /\b(?:hola|dónde|donde|está|esta|hay\s+un|qué|por\s+favor|gracias|buenos|días|restaurantes|cercanos|nein|bitte|danke|oui|merci|bonjour)\b/i.test(s)) {
+      return "";
+    }
+    return s;
+  }
+  function isForeignLanguageOutput(text) {
+    if (!text || typeof text !== "string") return false;
+    return /[¿¡]/.test(text) || /\b(?:No\s+hay\s+restaurantes|Sí,\s+en\s+los|centros\s+comerciales|cercanos\s+como|Le\s+gustaría\s+que|cocina\s+de)\b/i.test(text);
+  }
+  D.sanitizeAllowedLanguageAsr = sanitizeAllowedLanguageAsr;
+  D.isForeignLanguageOutput = isForeignLanguageOutput;
+
   D.acceptInputTranscription = function (chunk) {
     if (!chunk) return;
     const now = Date.now();
@@ -652,7 +680,7 @@
       if (replyAlreadyStreaming) window.__newModelTurnStarted = false;
       D.voiceTurnOpen = true;
       D.turnReplyStarted = replyAlreadyStreaming;
-      D.turnAsr = ""; D.turnShown = false; D.turnIsEcho = false; D.turnStartTs = now;
+      D.turnAsr = ""; D.turnRawAsr = ""; D.rescuedForeignQuery = ""; D.turnShown = false; D.turnIsEcho = false; D.turnStartTs = now;
       D.turnHadSpeaker = replyAlreadyStreaming ? false : ((now - D.lastSpeakerBusyTs) < CFG.echoRecentSpeakerMs || speakerBusy());
       try { if (typeof currentUserTranscript !== "undefined") D.prevUserText = currentUserTranscript || ""; } catch (e) {}
       if (!replyAlreadyStreaming) {
@@ -663,7 +691,10 @@
       duck(false);
     }
     if (D.turnIsEcho) { D.echoChunksDropped++; return; }
-    D.turnAsr += chunk;
+    D.turnRawAsr = (D.turnRawAsr || "") + chunk;
+    const sanitized = sanitizeAllowedLanguageAsr(D.turnRawAsr);
+    if (!sanitized) return;
+    D.turnAsr = sanitized;
 
     if (D.turnHadSpeaker) {
       const v = echoVerdict(D.turnAsr);

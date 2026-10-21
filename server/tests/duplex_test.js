@@ -945,6 +945,27 @@ const MODEL_TEXT = "为您推荐两个打卡点：第一家是滨海湾花园，
       /temperature:\s*0\.25/.test(appSrc) &&
       /珍宝海鲜/.test(appSrc) && /御宝轩/.test(appSrc) && /乐天味之楼/.test(appSrc) &&
       /【绝对禁止】使用“这片儿”、“口碑王”/.test(appSrc));
+
+    // T26: 根治“中文提问（北京菜有吗/粤菜/广东菜/湖北菜）被误识为西班牙语/德语（¿Hay un cajero? / Ja. / Hola, soy Guangdong）并用西语回复”（v111）：
+    //   1) 协议层锁定 inputAudioTranscription.languageCodes = ["cmn-Hans-CN", "zh-CN", "en-US"] + customVocabulary 菜系词表；
+    //   2) 客户端 sanitizeAllowedLanguageAsr 精准拦截小语种幻觉并还原中文菜系谐音；
+    //   3) 主模型若意外吐出西语 outputTranscription，立即切断外语音频并用还原后的中文重发！
+    assert("T26a 协议层锁定 inputAudioTranscription.languageCodes=['cmn-Hans-CN','zh-CN','en-US'] 及中餐菜系 customVocabulary",
+      /languageCodes:\s*\[\s*"cmn-Hans-CN"\s*,\s*"zh-CN"\s*,\s*"en-US"\s*\]/.test(appSrc) &&
+      /customVocabulary:\s*\[[\s\S]*?"北京菜"[\s\S]*?"粤菜"[\s\S]*?"广东菜"[\s\S]*?"湖北菜"/.test(appSrc));
+    const hLang = makeHarness();
+    await hLang.D().start("console");
+    assert("T26b sanitizeAllowedLanguageAsr 精准还原 ‘¿Hay un cajero?’→‘北京菜有吗？’、‘Ja.’→‘粤菜’、‘Hola, soy Guangdong’→‘那广东菜呢？’，并放行正常中英文",
+      hLang.D().sanitizeAllowedLanguageAsr("¿Hay un cajero?") === "北京菜有吗？" &&
+      hLang.D().sanitizeAllowedLanguageAsr("Ja.") === "粤菜" &&
+      hLang.D().sanitizeAllowedLanguageAsr("Hola, soy Guangdong") === "那广东菜呢？" &&
+      hLang.D().sanitizeAllowedLanguageAsr("¿Dónde está?") === "附近有吗？" &&
+      hLang.D().sanitizeAllowedLanguageAsr("北京菜有吗？") === "北京菜有吗？" &&
+      hLang.D().sanitizeAllowedLanguageAsr("take me to Marina Bay Sands") === "take me to Marina Bay Sands");
+    await hLang.serverMsg({ serverContent: { inputTranscription: { text: "¿Hay un cajero?" } } });
+    assert("T26c 服务端下发西语幻觉 ‘¿Hay un cajero?’ 时，用户气泡立即自愈显示为 ‘北京菜有吗？’",
+      hLang.calls.userBroadcasts.at(-1) === "北京菜有吗？",
+      "userBroadcast=" + hLang.calls.userBroadcasts.at(-1));
   }
 
   console.log("\n" + passed + " passed, " + failed + " failed");
