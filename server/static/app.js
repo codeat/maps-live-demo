@@ -225,6 +225,8 @@ async function setAudioSinkMode(mode) {
   if (mode === "direct") {
     try { masterGain.connect(playCtx.destination); } catch (e) {}
     if (audioSinkNodes) {
+      try { if (audioSinkNodes.keepSrc) { audioSinkNodes.keepSrc.stop(); audioSinkNodes.keepSrc.disconnect(); } } catch (e) {}
+      try { if (audioSinkNodes.keepGain) audioSinkNodes.keepGain.disconnect(); } catch (e) {}
       try { masterGain.disconnect(audioSinkNodes.dest); } catch (e) {}
       try { audioSinkNodes.pcA.close(); audioSinkNodes.pcB.close(); } catch (e) {}
       try { audioSinkNodes.el.srcObject = null; audioSinkNodes.el.remove(); } catch (e) {}
@@ -238,7 +240,7 @@ async function setAudioSinkMode(mode) {
     console.warn("[AudioSink] 当前环境不支持 RTCPeerConnection 回环，保持直出");
     return audioSinkMode;
   }
-  let dest = null, pcA = null, pcB = null, el = null;
+  let dest = null, pcA = null, pcB = null, el = null, keepSrc = null, keepGain = null, probeSrc = null;
   try {
     dest = playCtx.createMediaStreamDestination();
     pcA = new RTCPeerConnection(); pcB = new RTCPeerConnection();
@@ -265,12 +267,51 @@ async function setAudioSinkMode(mode) {
     masterGain.connect(dest);              // 回环就绪前双路并行输出，避免切换瞬间丢音
     const ok = await playing;
     if (!ok) throw new Error("loopback <audio> did not start playing");
+    // 真实浏览器必须实测 WebRTC RTP 字节真正到达 pcB（防止 Corp Chrome / VPN 阻断本地 UDP ICE 时 el.onplaying 假阳性导致切流静音）
+    if (typeof pcB.getStats === "function") {
+      if (typeof playCtx.createConstantSource === "function") {
+        probeSrc = playCtx.createConstantSource();
+        probeSrc.offset.value = 1e-5;
+        probeSrc.connect(dest);
+        probeSrc.start();
+      }
+      let rtpFlowing = false;
+      const deadline = Date.now() + 1200;
+      while (Date.now() < deadline && !rtpFlowing) {
+        await new Promise(r => setTimeout(r, 80));
+        const stats = await pcB.getStats();
+        stats.forEach((rep) => {
+          if (rep.type === "inbound-rtp" && rep.bytesReceived > 0) rtpFlowing = true;
+        });
+      }
+      try { if (probeSrc) { probeSrc.stop(); probeSrc.disconnect(); probeSrc = null; } } catch (e2) {}
+      if (!rtpFlowing) throw new Error("loopback WebRTC RTP blocked (0 bytes received)");
+      pcB.oniceconnectionstatechange = () => {
+        if (audioSinkMode === "loopback" && (pcB.iceConnectionState === "failed" || pcB.iceConnectionState === "disconnected")) {
+          console.warn("[AudioSink] 回环 ICE 中断，自动恢复 Web Audio 直出");
+          setAudioSinkMode("direct");
+        }
+      };
+    }
+    // 保持极低静音拉流负载挂接 destination，防止 macOS CoreAudio 下 AudioContext 因无直出节点停止时钟拉流 (crbug.com/933677)
+    if (typeof playCtx.createConstantSource === "function") {
+      keepSrc = playCtx.createConstantSource();
+      keepGain = playCtx.createGain();
+      keepSrc.offset.value = 0;
+      keepGain.gain.value = 0;
+      keepSrc.connect(keepGain);
+      keepGain.connect(playCtx.destination);
+      keepSrc.start();
+    }
     try { masterGain.disconnect(playCtx.destination); } catch (e) {}
-    audioSinkNodes = { dest, pcA, pcB, el };
+    audioSinkNodes = { dest, pcA, pcB, el, keepSrc, keepGain };
     audioSinkMode = "loopback";
     console.log("[AudioSink] 已切换为 WebRTC 回环播放通道（浏览器 AEC 参考流）");
   } catch (e) {
     console.warn("[AudioSink] 回环通道切换失败，保持直出:", e);
+    try { if (probeSrc) { probeSrc.stop(); probeSrc.disconnect(); } } catch (e2) {}
+    try { if (keepSrc) { keepSrc.stop(); keepSrc.disconnect(); } } catch (e2) {}
+    try { if (keepGain) keepGain.disconnect(); } catch (e2) {}
     try { if (dest) masterGain.disconnect(dest); } catch (e2) {}
     try { if (pcA) pcA.close(); if (pcB) pcB.close(); } catch (e2) {}
     try { if (el) { el.srcObject = null; el.remove(); } } catch (e2) {}

@@ -62,7 +62,7 @@
     preRollFrames: 5,                 // 开门瞬间补发最近 200ms 真实音频（弥补开门判定延迟）
     noiseRatio: 4.0,                  // 阈值 ≥ 本底噪声 × 4  (+12 dB)
     echoRatio: 2.5,                   // 阈值 ≥ 残余回声底 × 2.5 (+8 dB)
-    absMin: 0.012,                    // 绝对下限 (≈ -38 dBFS，拦截 AEC 收敛前的首字残音)
+    absMin: 0.036,                    // 绝对下限 (≈ -28.8 dBFS，仅在扬声器发声时生效：拦截笔记本外放 + AGC 放大后的首字残音，真人正常开口 ≥0.05 稳定开门)
     maxThreshold: 0.22,               // 安全上限 (≈ -13 dBFS，既允许门限涨过外放大音量回声，又防止巨响后卡死)
     floorAlpha: 0.05,                 // 本底噪声 EMA（下行快）
     floorRiseAlpha: 0.002,            // 本底噪声 EMA（上行慢，防止把人声学进去）
@@ -122,8 +122,9 @@
     stream: null, ctx: null, src: null, node: null,
     aecReported: null,               // track.getSettings().echoCancellation
     // 门限状态
-    noiseFloor: 0.003, echoFloor: 0.01,
+    noiseFloor: 0.003, echoFloor: 0.015,
     speechRun: 0, hangover: 0, gateOpen: false, openPeak: 0, gateOpenedAt: 0, hardCutDone: false,
+    unconfirmedInterruptTimer: null,
     preRoll: [],
     lastSpeakerBusyTs: 0,
     // 会话 / 轮次
@@ -225,17 +226,7 @@
     D.starting = true; D.cancelStart = false;
     D.scope = (typeof scope === "string") ? scope : inferScope();
     try { resumeAudioIfNeeded(); } catch (e) {}
-    try { if (typeof getMasterGain === "function") getMasterGain(); } catch (e) {}   // 在用户手势内创建/恢复播放上下文（含回环通道）
-    // macOS / 桌面 Chromium 的 Web Audio 直出（playCtx.destination）并不保证进入 getUserMedia 的 WebRTC AEC 参考流；
-    // 开麦瞬间趁用户手势激活 WebRTC 本地回环通道，使第一句播报起就具备样本级 AEC 参考抵消（无 RTCPeerConnection 环境安全跳过）
-    if (isChromium() && typeof RTCPeerConnection !== "undefined" &&
-        typeof setAudioSinkMode === "function" && typeof getAudioSinkMode === "function" &&
-        getAudioSinkMode() === "direct") {
-      const explicitPref = (typeof readPref === "function") ? readPref("mlSink", "sink", "") : "";
-      if (explicitPref !== "direct") {
-        try { setAudioSinkMode("loopback"); } catch (e) {}
-      }
-    }
+    try { if (typeof getMasterGain === "function") getMasterGain(); } catch (e) {}   // 在用户手势内创建/恢复播放上下文（桌面端保持 Web Audio 直出，杜绝 Corp Chrome / VPN 下本地 WebRTC 回环 ICE 不通导致无声）
     try {
       if (navigator.audioSession) navigator.audioSession.type = "play-and-record";    // iOS Safari：提前锁定会话类别
     } catch (e) {}
@@ -327,17 +318,10 @@
     if (D.tickTimer) { clearInterval(D.tickTimer); D.tickTimer = null; }
     if (D.statTimer) { clearInterval(D.statTimer); D.statTimer = null; }
     D.gateOpen = false; D.speechRun = 0; D.preRoll = []; D.pttForce = false; D.hardCutDone = false;
+    if (D.unconfirmedInterruptTimer) { clearTimeout(D.unconfirmedInterruptTimer); D.unconfirmedInterruptTimer = null; }
     clearHold();
     D.voiceTurnOpen = false; D.turnAsr = ""; D.turnShown = false; D.turnIsEcho = false;
     duck(false);
-    if (typeof RTCPeerConnection !== "undefined" &&
-        typeof setAudioSinkMode === "function" && typeof getAudioSinkMode === "function" &&
-        getAudioSinkMode() === "loopback") {
-      const explicitPref = (typeof readPref === "function") ? readPref("mlSink", "sink", "") : "";
-      if (explicitPref !== "loopback" && !/Android/.test((navigator && navigator.userAgent) || "")) {
-        try { setAudioSinkMode("direct"); } catch (e) {}
-      }
-    }
     try { updateAllMicButtons(false); } catch (e) {}
     setState(S.OFF, true);
     try { hideVoiceToast(); } catch (e) {}
@@ -528,11 +512,22 @@
     if (sc.interrupted) {
       // 服务端确认用户插话：瞬间掐断本地已排队的全部音频（Live API 下发领先于实时，本地可能还囤着数秒）
       D.interrupts++;
+      const peakAtInterrupt = D.openPeak;
       confirmBargeIn("interrupted");
       try { stopAllAudioPlayback(); } catch (e) {}
       duck(false);
       D.hardCutDone = false;
       endVoiceTurn("interrupted");
+      // 自校准护栏：若大音量外放残音偶发冲破门限触发了 interrupted，但 1.5s 内未产生真实人声转写（或产生混响畸变外语幻觉如 "¿Qué tal?"），自动抬高 echoFloor 杜绝二次复发
+      if (peakAtInterrupt > 0) {
+        if (D.unconfirmedInterruptTimer) clearTimeout(D.unconfirmedInterruptTimer);
+        D.unconfirmedInterruptTimer = setTimeout(() => {
+          D.unconfirmedInterruptTimer = null;
+          D.echoFloor = Math.max(D.echoFloor, peakAtInterrupt * 1.25);
+          log("post-interrupt no human ASR → calibrated echoFloor to", D.echoFloor.toFixed(4));
+        }, 1500);
+        D._lastInterruptPeak = peakAtInterrupt;
+      }
       log("interrupted");
     }
     if (sc.turnComplete) {
@@ -573,6 +568,10 @@
     if (!chunk) return;
     const now = Date.now();
     D.lastInputTs = now;
+    if (D.unconfirmedInterruptTimer && !/[¿¡À-ÿ]/.test(chunk)) {
+      clearTimeout(D.unconfirmedInterruptTimer);
+      D.unconfirmedInterruptTimer = null;
+    }
     confirmBargeIn("asr");
     if (!D.voiceTurnOpen) {
       D.voiceTurnOpen = true;

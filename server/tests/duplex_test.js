@@ -791,14 +791,37 @@ const MODEL_TEXT = "为您推荐两个打卡点：第一家是滨海湾花园，
     h.F.bargeIn("text");
     assert("T22e bargeIn 保留已学到的 echoFloor，不清零回 0.002", h.D().echoFloor >= 0.065);
 
-    // 真实 Chromium (具备 RTCPeerConnection) 开麦瞬间即主动切换 loopback AEC 参考流
+    // 桌面 Chromium 开麦必须保持 Web Audio direct 直出（防止 Corp Chrome / VPN 下本地 RTCPeerConnection 无 UDP 导致静音）
     const hRtc = makeHarness({ rtc: true });
     await hRtc.D().start("console");
-    await new Promise(r => setTimeout(r, 20));
-    assert("T22f Chromium 开麦即主动启用 WebRTC loopback AEC 参考通道", hRtc.F.getAudioSinkMode() === "loopback");
-    hRtc.D().stop(true);
-    await new Promise(r => setTimeout(r, 20));
-    assert("T22f 关麦后恢复 Web Audio direct 直出通道", hRtc.F.getAudioSinkMode() === "direct");
+    assert("T22f 桌面 Chromium 开麦保持 direct 直出，不断开 playCtx.destination",
+      hRtc.F.getAudioSinkMode() === "direct" && hRtc.g().masterGain.connections.has(hRtc.g().playCtx.destination));
+
+    // 当真实浏览器 getStats() 显示 inbound-rtp bytesReceived=0（Corp Chrome / VPN 阻断本地 UDP）时，setAudioSinkMode("loopback") 必须回退 direct 绝不静音
+    const hBlocked = makeHarness({ rtc: true });
+    hBlocked.FakeRTC.prototype.getStats = async () => new Map([["r1", { type: "inbound-rtp", bytesReceived: 0 }]]);
+    const fallbackPromise = hBlocked.F.setAudioSinkMode("loopback");
+    for (let i = 0; i < 25; i++) {
+      await new Promise(r => setImmediate(r));
+      hBlocked.advance(100);
+    }
+    const fallbackMode = await fallbackPromise;
+    delete hBlocked.FakeRTC.prototype.getStats;
+    assert("T22g WebRTC 回环 0 收包时自动回退 direct，绝不断开扬声器直出",
+      fallbackMode === "direct" && hBlocked.g().masterGain.connections.has(hBlocked.g().playCtx.destination));
+
+    // 首句外放残音（rms=0.032）在 direct 模式下首帧即被拦截；若偶发峰值触发混响畸变外语幻觉（如 "¿Qué tal?"），1.5s 自动抬高 echoFloor
+    const hCalib = makeHarness();
+    await hCalib.D().start("console");
+    hCalib.set.sceneLock(true);
+    for (let i = 0; i < 4; i++) hCalib.F.playPcm(hCalib.pcm(200));
+    for (let i = 0; i < 10; i++) hCalib.pushFrame(0.032);
+    assert("T22h direct 模式首句笔记本残音 (rms=0.032) 全程零开门并自适应抬升 echoFloor", hCalib.D().stats().gateOpens === 0 && hCalib.D().echoFloor >= 0.028);
+    for (let i = 0; i < 3; i++) hCalib.pushFrame(0.09);
+    await hCalib.serverMsg({ serverContent: { interrupted: true } });
+    await hCalib.serverMsg({ serverContent: { inputTranscription: { text: "¿Qué tal?" } } });
+    hCalib.advance(1600);
+    assert("T22h 混响畸变伪转写 (¿Qué tal?) 触发 interrupted 后自动抬高 echoFloor ≥ 0.11", hCalib.D().echoFloor >= 0.11);
   }
 
   console.log("\n" + passed + " passed, " + failed + " failed");
