@@ -53,22 +53,23 @@
     // 服务端 VAD（写入 setup.realtimeInputConfig）
     startSensitivity: "START_SENSITIVITY_LOW", // 低起始灵敏度：屏蔽残余回声瞬态误打断，真人持续开口仍稳定触发 interrupted
     endSensitivity: "END_SENSITIVITY_HIGH",
-    prefixPaddingMs: 300,             // 300ms 预拾音，防止吞字头
-    silenceDurationMs: 800,           // 恢复 800ms 停顿断句，防止半句话停顿被抢答
+    prefixPaddingMs: 500,             // 500ms 服务端前置填充，确保句首辅音/轻读字（“那/有/肉”）完整纳入识别窗
+    silenceDurationMs: 500,           // 500ms 停顿断句，兼顾自然换气与毫秒级极速响应（每轮立省 300ms 等待）
 
     // 客户端残余回声门限（仅在扬声器出声期间生效；扬声器静默时全量直通）
-    gateOpenFrames: 3,                // 连续 3 帧 (120ms) 超阈才开门
-    gateHangoverFrames: 12,           // 正常说话保持 480ms 不断字（完整保留中文 x/c/q/sh 等清辅音谷值，杜绝吞辅音）
-    preRollFrames: 5,                 // 开门瞬间补发最近 200ms 真实音频（弥补开门判定延迟）
-    noiseRatio: 4.0,                  // 阈值 ≥ 本底噪声 × 4  (+12 dB)
-    echoRatio: 2.2,                   // 阈值 ≥ 残余回声底 × 2.2 (+6.8 dB)
-    absMin: 0.015,                    // 绝对下限 (≈ -36.5 dBFS，拦截稳态外放残音，同时放行 WebRTC AEC 双讲压缩后的正常人声)
-    maxThreshold: 0.055,              // 门限硬上限 (≈ -25.2 dBFS，严禁门限涨过双讲人声导致怎么说话都打断不了)
+    gateOpenFrames: 3,                // 连续 3 帧 (120ms) 超阈立即开门
+    gateHangoverFrames: 16,           // 施密特迟滞保持 640ms 不断字（彻底保护句中换气与清辅音谷值，严禁切碎句子）
+    preRollFrames: 15,                // 开门瞬间完整补发前 600ms 原始 PCM（100% 保留句首字头，零吞字）
+    noiseRatio: 4.0,                  // 开门阈值 ≥ 本底噪声 × 4  (+12 dB)
+    echoRatio: 2.0,                   // 开门阈值 ≥ 残余回声底 × 2.0 (+6 dB)
+    absMin: 0.012,                    // 开门绝对下限 (拦截稳态外放残音，放行轻声人声)
+    holdMin: 0.011,                   // 施密特保持下限：开门压低外放 (-18dB) 后回声跌至 ≤0.008，而真人双讲 ≥0.012 稳稳保持全开不抖动！
+    maxThreshold: 0.042,              // 门限硬上限 (严禁门限涨过双讲人声)
     floorAlpha: 0.05,                 // 本底噪声 EMA（下行快）
     floorRiseAlpha: 0.002,            // 本底噪声 EMA（上行慢，防止把人声学进去）
     echoAlphaUp: 0.2,                 // 残余回声底 EMA（上行快）
     echoAlphaDown: 0.01,              // 残余回声底 EMA（下行慢，防止门限来回震荡）
-    speakerTailSec: 0.5,              // 最后一段音频结束后再保守 500ms 视为扬声器仍在出声（混响 + WebRTC 回环缓冲延迟）
+    speakerTailSec: 0.15,             // 音频播完仅留 150ms 余量即刻解除门控，杜绝抢答吞头
 
     // 闪避与本地硬切
     duckGain: 0.12,                   // 门一开立刻把扬声器压到 -18 dB（回声随之骤降 8 倍自动关门，误报可无损恢复）
@@ -78,7 +79,7 @@
     // 语义回声侦测
     echoRecentSpeakerMs: 3500,        // 仅当用户轮开始前 3.5s 内扬声器出过声才可能是回声
     echoMinTokens: 8,                 // 与模型近期播报连续 ≥ 8 个字/词逐字重合才判回声（短答如“天天”“滨海湾花园”永不误杀）
-    holdUserTextMs: 700,              // 疑似窗口内先扣留 ASR 最多 700ms 再上屏（只影响字幕，不影响音频切断）
+    holdUserTextMs: 220,              // 疑似窗口仅微扣留 220ms 再上屏（立省 480ms 视觉延迟，且不影响短答保护）
     echoTextWindowMs: 45000,
     echoTextMaxTokens: 1500,
     echoLoopWindowMs: 60000,          // 60s 内回声事件计数窗口
@@ -262,7 +263,7 @@
     catch (e) { ctx = new (window.AudioContext || window.webkitAudioContext)(); }
     if (ctx.state === "suspended") { try { await ctx.resume(); } catch (e) {} }
     try {
-      await ctx.audioWorklet.addModule("/static/pcm-capture-worklet.js?v=1");
+      await ctx.audioWorklet.addModule("/static/pcm-capture-worklet.js?v=2");
     } catch (e) {
       console.error("[Duplex] worklet load failed:", e);
       toast("⚠️ 音频处理模块加载失败", 4000);
@@ -391,12 +392,12 @@
         const above = rms > thr;
         if (!D.gateOpen) {
           D.speechRun = above ? D.speechRun + 1 : 0;
-          // 双讲破门保护：WebRTC AEC 在扬声器大声播报同时人声开口（Double-Talk）时常把人声压低到 0.018~0.045；
-          // 外放残音随音节断续跳动，而真人说话连续 ≥7 帧（280ms）稳定高于 max(0.018, noiseFloor×5)，此时自适应回调虚高门限并开门
-          const dtSustained = !above && rms >= Math.max(0.018, D.noiseFloor * 5);
+          // 双讲破门保护：WebRTC AEC 在扬声器大声播报同时人声开口（Double-Talk）时常把人声压低到 0.014~0.040；
+          // 真人说话连续 ≥5 帧（200ms）稳定高于 max(0.013, noiseFloor×4) 即自适应开门，并配合 600ms preRoll 完整补齐字头
+          const dtSustained = !above && rms >= Math.max(0.013, D.noiseFloor * 4);
           D.dtRun = dtSustained ? D.dtRun + 1 : 0;
-          if (D.speechRun >= CFG.gateOpenFrames || D.dtRun >= 7) {
-            if (D.dtRun >= 7) D.echoFloor = Math.min(D.echoFloor, rms * 0.8);
+          if (D.speechRun >= CFG.gateOpenFrames || D.dtRun >= 5) {
+            if (D.dtRun >= 5) D.echoFloor = Math.min(D.echoFloor, rms * 0.75);
             D.dtRun = 0;
             openGate(rms, thr);
           } else {
@@ -407,14 +408,18 @@
           }
         } else {
           if (rms > D.openPeak) D.openPeak = rms;
-          if (above) {
+          // 施密特双阈值迟滞保持（Schmitt-Trigger Hysteresis）：
+          // 开门瞬间 duck(true) 已将扬声器压低 -18 dB (0.12×)，纯外放瞬态回声立即跌落至 ≤0.008；
+          // 而真人双讲语音始终稳定在 ≥0.012。改用低保持阈值 holdThr 判定延续态，彻底消灭“开闸 240ms 后在句子正中间关闸填零”的切字顽疾！
+          const holdThr = Math.max(D.noiseFloor * 3.0, CFG.holdMin || 0.011);
+          if (rms > holdThr) {
             D.postDuckSpeech = (D.postDuckSpeech || 0) + 1;
             D.postDuckQuiet = 0;
             D.hangover = CFG.gateHangoverFrames;
           } else {
             D.postDuckQuiet = (D.postDuckQuiet || 0) + 1;
-            // 若开门闪避 (-18dB) 后从未出现后续超阈帧（postDuckSpeech===0）且连续 6 帧 (240ms) 骤降：判定为纯外放瞬态回声，立即关门防误触硬切；
-            // 若已有真人连续语音帧，则完整保留 12 帧 (480ms) hangover，确保中文清辅音与句中微停顿一字不漏！
+            // 若开门闪避 (-18dB) 后从未出现人声延续帧（postDuckSpeech===0）且连续 6 帧 (240ms) ≤0.011：判定为纯外放瞬态回声，立即关门防误触硬切；
+            // 若已有真人连续语音帧，则完整保留 16 帧 (640ms) hangover，确保中文清辅音与句中微停顿一字不漏！
             if ((D.postDuckSpeech || 0) === 0 && D.postDuckQuiet >= 6) closeGate();
             else if (--D.hangover <= 0) closeGate();
           }
@@ -546,11 +551,12 @@
   // 关闭当前用户语音轮。保护：用户轮刚开始（< turnGuardMs）且模型对它还没有任何输出时，到达的 interrupted / turnComplete
   // 属于被这句话打断的上一轮（ASR 可能比 interrupted 先到），此时只归档语料、不关闭，否则同一句话会被拆成两轮。
   function endVoiceTurn(src) {
-    if (D.voiceTurnOpen && !D.curModelText && (Date.now() - D.turnStartTs) < CFG.turnGuardMs) {
+    if (D.voiceTurnOpen && !D.curModelText && !D.turnReplyStarted && (Date.now() - D.turnStartTs) < CFG.turnGuardMs) {
       log("endVoiceTurn(" + src + ") ignored: user turn just started");
       return;
     }
     D.voiceTurnOpen = false;
+    D.turnReplyStarted = false;
     clearHold();
     pushModelHistory();
   }
@@ -570,7 +576,9 @@
   // 由 app.js 在 serverContent.inputTranscription 到达时调用。本函数负责：
   //   · 服务端听到了人声 → 撤销本地门限的误报计时（这是最可靠的“真人在说话”证据）
   //   · 第一段 ASR 到达即掐断仍在本地排队的旧音频（模型已说完但尾巴还在播的场景，服务端不会发 interrupted）
-  //   · 疑似窗口（扬声器 3.5s 内出过声）内先扣留字幕 ≤700ms，累计 ≥8 词元后与模型近期播报比对
+  //   · 关键竞态保护：Gemini 3.8 Live 常在 inputTranscription 到达前 2~200ms 先下发新一轮 modelTurn.inlineData 音频；
+  //     若 app.js 已为新一轮开启流式输出（window.__newModelTurnStarted===true），严禁再调 beginVoiceUserTurn() 误杀新回答！
+  //   · 疑似窗口（扬声器 3.5s 内出过声）内先扣留字幕 ≤220ms，累计 ≥8 词元后与模型近期播报比对
   //   · 判定回声 → 不上屏、计数并按次数升级防御；否则 beginVoiceUserTurn() 清场并上屏
   D.acceptInputTranscription = function (chunk) {
     if (!chunk) return;
@@ -578,12 +586,18 @@
     D.lastInputTs = now;
     confirmBargeIn("asr");
     if (!D.voiceTurnOpen) {
+      const replyAlreadyStreaming = !!(typeof window !== "undefined" && window.__newModelTurnStarted);
+      if (replyAlreadyStreaming) window.__newModelTurnStarted = false;
       D.voiceTurnOpen = true;
+      D.turnReplyStarted = replyAlreadyStreaming;
       D.turnAsr = ""; D.turnShown = false; D.turnIsEcho = false; D.turnStartTs = now;
-      D.turnHadSpeaker = (now - D.lastSpeakerBusyTs) < CFG.echoRecentSpeakerMs || speakerBusy();
+      D.turnHadSpeaker = replyAlreadyStreaming ? false : ((now - D.lastSpeakerBusyTs) < CFG.echoRecentSpeakerMs || speakerBusy());
       try { if (typeof currentUserTranscript !== "undefined") D.prevUserText = currentUserTranscript || ""; } catch (e) {}
-      pushModelHistory();                // 上一轮模型文本归档进回声比对语料
-      beginVoiceUserTurn();              // 立即清场：掐旧音频（自环的声源就是它）、清推荐按键、sceneLock；字幕可稍后再上
+      if (!replyAlreadyStreaming) {
+        if (typeof window !== "undefined") window.__awaitingNewModelTurn = false;
+        pushModelHistory();              // 上一轮模型文本归档进回声比对语料
+        beginVoiceUserTurn();            // 立即清场：掐旧音频（自环的声源就是它）、清推荐按键、sceneLock；字幕可稍后再上
+      }
       duck(false);
     }
     if (D.turnIsEcho) { D.echoChunksDropped++; return; }

@@ -345,7 +345,7 @@ const MODEL_TEXT = "为您推荐两个打卡点：第一家是滨海湾花园，
     h.pushFrame(0.05);
     assert("T3 第 3 帧开门", h.D().gateOpen === true && h.D().stats().gateOpens === 1);
     const flushed = h.audioFrames().slice(n1);
-    assert("T3 开门瞬间补发 5 帧预卷 + 当前帧（都是真实音频）", flushed.length === 6 && flushed.every(d => d !== SILENCE_B64), "flushed=" + flushed.length);
+    assert("T3 开门瞬间补发完整 preRoll 预卷 + 当前帧（都是真实音频）", flushed.length === h.D().CFG.preRollFrames + 1 && flushed.every(d => d !== SILENCE_B64), "flushed=" + flushed.length);
     assert("T3 开门即闪避到 -18dB", h.g().masterGain.gain.target === 0.12, "target=" + h.g().masterGain.gain.target);
     h.advance(100);
     assert("T3 状态机进入 user_speaking", h.bodyCls.has("duplex-user_speaking"));
@@ -830,6 +830,83 @@ const MODEL_TEXT = "为您推荐两个打卡点：第一家是滨海湾花园，
     delete hBlocked.FakeRTC.prototype.getStats;
     assert("T22h WebRTC 回环 0 收包时自动回退 direct，绝不断开扬声器直出",
       fallbackMode === "direct" && hBlocked.g().masterGain.connections.has(hBlocked.g().playCtx.destination));
+  }
+
+  // ---------------- T23 根治“识别不准 / 响应慢 / 偶发无响应”三大真机线上顽疾（v107） ----------------
+  {
+    // T23a: AudioWorklet 48kHz -> 16kHz 多相盒式抗混叠降采样验证（消除 3:1 裸抽样高频混叠失真）
+    const workletSrc = fs.readFileSync(path.join(ROOT, "static", "pcm-capture-worklet.js"), "utf8");
+    const wOut = [];
+    const wCtx = {
+      sampleRate: 48000,
+      Math, Int16Array,
+      AudioWorkletProcessor: class { constructor() { this.port = { postMessage: (d) => wOut.push(d) }; } },
+      registerProcessor: (name, cls) => { wCtx.Proc = cls; }
+    };
+    vm.createContext(wCtx);
+    vm.runInContext(workletSrc, wCtx);
+    const proc = new wCtx.Proc({ processorOptions: { targetRate: 16000, frameMs: 40 } });
+    // 构造连续跨块的 16kHz 镜像混叠测试信号（在 48kHz 下周期严格为 3 采样：[+0.9, -0.45, -0.45]）：
+    // 旧线性裸抽样 pos+=3 只取第 0 点会输出恒定 +0.9（严重混叠失真！），而 3 点盒式低通积分 (0.9 - 0.45 - 0.45)/3 === 0（完美抑制混叠！）
+    for (let b = 0; b < 16; b++) {
+      const aliasBlock = new Float32Array(128);
+      for (let i = 0; i < 128; i++) aliasBlock[i] = ((b * 128 + i) % 3 === 0) ? 0.9 : -0.45;
+      proc.process([[aliasBlock]]);
+    }
+    assert("T23a 48kHz→16kHz AudioWorklet 盒式抗混叠滤波彻底抑制 16kHz 混叠频率 (rms < 0.001)",
+      wOut.length === 1 && wOut[0].rms < 0.001, "rms=" + (wOut[0] && wOut[0].rms));
+
+    // T23b: 复现线上 client #8 “那有粤菜吗？→ 没有玩游戏吧？”根因：
+    // 播报期间用户双讲语音（rms = 0.020~0.024，低于开门前的 echoFloor*2.0 阈值），持续说 28 帧（1.12s）：
+    //   1) 600ms (15 帧) preRoll 必须 100% 补齐句首全部真实语音帧（0 丢头）；
+    //   2) 开门后施密特保持阈值 holdThr + 500ms 本地硬切转直通必须确保后续【0 帧被门控填零】，28 帧语音 100% 完整上行！
+    const hDt = makeHarness();
+    await hDt.D().start("console");
+    hDt.D().echoFloor = 0.025; // 高回声底，令 thr = 0.042 > 用户双讲 rms (0.020)
+    hDt.set.sceneLock(true);
+    hDt.F.playPcm(hDt.pcm(3000));
+    const startSent = hDt.D().stats().framesSent;
+    let openedOnce = false;
+    let gatedAfterOpen = 0;
+    for (let i = 0; i < 28; i++) {
+      hDt.advance(40);
+      const gatedBefore = hDt.D().stats().framesGated;
+      hDt.pushFrame(0.020 + (i % 3) * 0.002); // 模拟真实人类说“那有粤菜吗？”的连续双讲包络 (0.020~0.024)
+      if (hDt.D().gateOpen) openedOnce = true;
+      if (openedOnce && hDt.D().stats().framesGated > gatedBefore) gatedAfterOpen++;
+    }
+    const realFramesDelivered = hDt.D().stats().framesSent - startSent;
+    assert("T23b 双讲说话期间施密特门控 0 填零断句，且 28 帧语音 100% 完整上行（含句首预卷）",
+      openedOnce && gatedAfterOpen === 0 && realFramesDelivered === 28,
+      "opened=" + openedOnce + " gatedAfterOpen=" + gatedAfterOpen + " delivered=" + realFramesDelivered + "/28");
+
+    // T23c: 复现线上 client #21 / #5 / #8 “偶发无响应 / 回复被掐灭”真凶竞态：
+    // Gemini 3.8 Live 先下发 interrupted 清掉上一轮，随后新一轮 inlineData 语音先于 inputTranscription 30ms 到达！
+    // 迟到的 inputTranscription 绝对不能调用 stopAllAudioPlayback() 掐灭模型正在播报的新回答！
+    const hRace = makeHarness();
+    await hRace.D().start("console");
+    hRace.set.sceneLock(true);
+    await hRace.serverMsg({ serverContent: { outputTranscription: { text: "上一轮推荐松发肉骨茶" }, modelTurn: { parts: [{ inlineData: { data: hRace.pcm(500) } }] } } });
+    // 用户开口打断上一轮，服务端先发 interrupted
+    await hRace.serverMsg({ serverContent: { interrupted: true } });
+    assert("T23c 前置：interrupted 已清空上一轮旧音频", hRace.g().activeAudioSources.size === 0);
+    // 服务端先下发新一轮回答的首包音频与文本（早于 inputTranscription 到达！）
+    await hRace.serverMsg({ serverContent: { outputTranscription: { text: "附近有两家很棒的粤菜馆：" }, modelTurn: { parts: [{ inlineData: { data: hRace.pcm(600) } }] } } });
+    assert("T23c 新一轮回答音频已正常起播", hRace.g().activeAudioSources.size === 1);
+    // 30ms 后 inputTranscription 才姗姗来迟
+    hRace.advance(30);
+    await hRace.serverMsg({ serverContent: { inputTranscription: { text: "那有粤菜吗？" } } });
+    assert("T23c 迟到的 inputTranscription 绝不掐灭新回答音频，且新回答文本与用户提问双双完整上屏",
+      hRace.g().activeAudioSources.size === 1 &&
+      hRace.g().currentModelTranscript === "附近有两家很棒的粤菜馆：" &&
+      hRace.calls.userBroadcasts.at(-1) === "那有粤菜吗？",
+      "sources=" + hRace.g().activeAudioSources.size + " model=" + hRace.g().currentModelTranscript + " user=" + JSON.stringify(hRace.calls.userBroadcasts));
+
+    // T23d: 静态配置核验：锁定中文 cmn-CN 防西语幻觉 + 500ms 极速静音断句 + 禁止口播“推荐选项”尾巴
+    assert("T23d setup 锁定 speechConfig.languageCode = cmn-CN 且 VAD silenceDurationMs ≤ 550ms",
+      /speechConfig:\s*\{\s*languageCode:\s*"cmn-CN"\s*\}/.test(appSrc) &&
+      hRace.D().CFG.silenceDurationMs <= 550 &&
+      hRace.D().CFG.preRollFrames >= 15);
   }
 
   console.log("\n" + passed + " passed, " + failed + " failed");

@@ -373,6 +373,35 @@ const ECHO_TURN_MUTE_MS = 15000;       // 回声轮静音上限（正常由该�
 let duplexSetupActive = false;         // 本连接 setup 是否启用了服务端 VAD（决定 realtimeText 是否需要 activityStart/End）
 let expectedUiFc = null;               // 界面操作后预期模型回调的 start_navigation（去重日志用）
 const lateAudioGate = { active: false, reason: "", until: 0, untilTurnComplete: false, dropped: 0, armed: 0 };
+if (typeof window !== "undefined") {
+  window.__awaitingNewModelTurn = false;
+  window.__newModelTurnStarted = false;
+}
+function markModelBoundaryCleared() {
+  if (typeof window !== "undefined") {
+    window.__awaitingNewModelTurn = true;
+    window.__newModelTurnStarted = false;
+  }
+}
+function prepareFreshModelTurnIfNeeded() {
+  if (typeof window === "undefined" || !window.__awaitingNewModelTurn) return;
+  window.__awaitingNewModelTurn = false;
+  // 若 Duplex 尚未收到新一轮 inputTranscription（Gemini 3.8 Live 常提前 2~200ms 先发 inlineData 语音），
+  // 在首帧新模型输出前做无损清场（绝不调 stopAllAudioPlayback），并标记新回复已开流，防止迟到的 inputTranscription 误杀新声音！
+  const userTurnAlreadyOpen = !!(window.DuplexVoice && window.DuplexVoice.voiceTurnOpen);
+  if (!userTurnAlreadyOpen) {
+    window.__newModelTurnStarted = true;
+    if (window.DuplexVoice && typeof window.DuplexVoice.noteModelText === "function" && currentModelTranscript) {
+      try { window.DuplexVoice.noteModelText(currentModelTranscript); } catch (e) {}
+    }
+    try { if (typeof simState === "undefined" || !simState.active) exitNavigation(); } catch (e) {}
+    currentModelTranscript = "";
+    try { renderRecommendationOptions([]); } catch (e) {}
+    try { if (typeof lastRenderedOptionsKey !== "undefined") lastRenderedOptionsKey = ""; } catch (e) {}
+    try { resetDispatchState(); } catch (e) {}
+    sceneLock = true;
+  }
+}
 
 function duplexMicOn() { return !!(typeof window !== "undefined" && window.DuplexVoice && window.DuplexVoice.micOn); }
 function duplexReady() {
@@ -412,6 +441,10 @@ function shouldDropLateAudio() {
 // 四路打断统一入口。返回：上一轮是否仍在进行（即是否布置了迟到帧门）
 function bargeIn(reason) {
   const turnOpen = !!sceneLock;
+  if (typeof window !== "undefined") {
+    window.__awaitingNewModelTurn = false;
+    window.__newModelTurnStarted = false;
+  }
   stopAllAudioPlayback();
   if (turnOpen) armLateAudioGate(reason);
   if (typeof window !== "undefined" && window.DuplexVoice && typeof window.DuplexVoice.bargeIn === "function") {
@@ -2090,49 +2123,23 @@ function connect() {
     const landmark = currentCity.pickupLandmark || currentCity.name;
     const regionName = currentCity.name;
     const addr = currentCity.address || "";
-    const sysPrompt = `你是专业智能出行、生活助手与车载/AR智能眼镜伴侣。你的工具包括 Google Search、Google Maps 以及 start_navigation 函数调用。
-【核心准则：全能力动态按需调用，严禁过度或无意义触发工具】
-0) 【用户当前高精度出发位置 / 起点 (Origin Landmark)】:
-   - 出发定位地标: ${landmark}
-   - 所属城市/商圈: ${regionName}
-   - 道路详细门牌: ${addr}
-   - 精确GPS坐标: 纬度 ${lat}, 经度 ${lng}
-   - 【就近检索与距离把控铁律（严禁跨区推荐10公里远店）】：
-     · 用户目前正身处【${landmark}】！所有周边推荐（美食、奶茶、咖啡、快餐、商圈打卡）必须严格以此位置为中心就近搜索；
-     · 优先推荐步行（500米~1公里）或短途车程（1~3.5公里）内的核心商圈门店；
-     · 【绝不允许】跳过市中心 3 公里内的近店，盲目推荐 10 公里以外的偏远郊区分店（例如在新加坡乌节路寻找蜜雪冰城、肉骨茶或咖啡时，最近的蜜雪冰城在城联广场 CityLink 约3公里、武吉士 Bugis 约3.2公里，绝不能推荐金文泰、裕廊东等10公里远店）；
-     · 若该品牌在乌节路商场本身无直营分店，请向用户明确告知最近分店位于约3公里的哪个商圈（例如：“乌节路商圈内暂无蜜雪冰城，为您推荐离您最近的两家：第一家是城联广场店(CityLink，车程约3公里)，第二家是武吉士店(MIXUE Bugis，车程约3.2公里)…”），确保真实可达，绝不误导！
-1) 纯通用闲聊、百科常识、翻译、幽默对话、哲学思考、数学推理：
-   - 直接依靠你的原生大模型能力自然作答，【绝对不要】调用任何工具、不需要 Google Search 也无需 Google Maps，更不能调用导航！保持极速响应。
-2) 实时资讯、最新动态、今日天气、时事新闻、特定场馆最新营业门票：
-   - 【按需调用 Google Search 接地】获取最新准确资讯。
-3) 周边商铺、具体餐馆推荐、查询某个真实门店或打卡点位置：
-   - 【按需调用 Google Maps 接地】检索本地 15 公里以内真实实体。
-4) 明确出行规划与导航意图：
-   - 仅当用户【明确表达想去某地、导航到某地、规划去某地的路线、或者问怎么开车/步行/骑行去某地】时，你才在回复中【按需调用 start_navigation 函数】！
-   - 如果用户只是在询问某个景点的历史、建筑特色或营业时间，请仅作介绍，【严禁】擅自调用 start_navigation！
-   - 【推荐多个候选地点时的强制收尾格式】只要你一次向用户推荐了 2~3 个候选地点、或让用户二选一/三选一（例如“第一家是…第二家是…”“您想去哪一个”），你【必须】在整段回答的最末尾追加一句固定格式的收尾：【推荐选项：地点A | 地点B】（三个则为【推荐选项：地点A | 地点B | 地点C】）。
-     · 地点名只写地点的正式名称（中文名，可紧跟英文名），【不要】带评分、形容词、“第一家/第二家”等序数或任何描述。
-     · 语音播报时把这句念成简短的“推荐选项：地点A、地点B”即可。
-     · 该收尾会被系统自动从字幕中清洗并转换为用户可一键点击的目的地按键，不会打扰用户，因此【绝不能省略】。
-     · 示例：“为您推荐两个打卡点：第一家是滨海湾花园，评分4.7；第二家是鱼尾狮公园，评分4.6。您想去哪一个？【推荐选项：滨海湾花园 | 鱼尾狮公园】”
-   - 若用户已经明确说“带我去/规划路线/导航过去”而你只有一个最佳地点，则直接调用 start_navigation，不要输出推荐选项收尾。
-   - 【复合提问与规划指令规则】：当用户针对【单一具体地点或特定活动事件】发出复合提问（如“搜索水幕秀几点开始，并规划路线带我去最佳观赏点”或“查询高岛屋营业时间并规划路线”），你在回答资讯的同时，【必须在第一时刻直接调用 start_navigation 函数】（destination 传具体地点如“滨海湾金沙活动广场”，travel_mode 传 "DRIVING"）！
-   - 即使你在口语中友好地询问用户“您是想开车、走路还是骑车去呢？”，你也【绝对不能】省略或推迟 start_navigation 函数调用！系统界面会自动秒级弹出驾车、骑行、步行三种路线卡片供用户选择，后台必须第一时间下发 start_navigation！
-   - 【多候选推荐与规划意图消歧关键准则（严禁提前调用导航破坏语音与文字完整性）】：
-     · 如果用户提出的问题是要求【推荐多个地点/周边候选】并附带规划路线（例如“推荐当前位置周边 10 公里内评分最高的热门打卡景点，并规划路线带我过去”或“推荐周边评价最高的3家餐厅并规划路线”），用户的首要诉求是【先挑选具体想去哪一个目的地】！
-     · 此时你【绝对严禁在回答中途提前调用 start_navigation 函数】！因为在用户选定具体地点之前提前调用导航，会导致大模型语音与文字严重截断、输出残缺！
-     · 你【必须完整介绍完 2~3 个候选地点及其亮点/评分】，并在整段回答最末尾追加固定格式的收尾：【推荐选项：地点A | 地点B】供用户点击选择。
-     · 只有当用户后续点击选项、或者说出“去第一家/去A/带我过去/走吧”确认了具体目的地时，你才立即调用 start_navigation！
-     · 核心区分点：如果提问指向的是【唯一的单一具体目标或事件观赏点】（如水幕秀最佳观赏点、指定商场），直接调用 start_navigation；如果提问是【推荐多个/热门景点/特色美食】候选，必须完整介绍并输出推荐选项，决不提前触发 start_navigation！
-5) 【至关重要：多轮对话上下文连续性与指代消解准则】：
-   - 用户与你处于持续连贯的多轮会话中！用户后续补充信息或指令经常包含代词、简称或序数词（例如“导航过去”、“去第一家/第一个”、“走吧”、“去那里”、“去刚才说的那个地点”、“开车去”等）。
-   - 你必须严格结合上一轮或前几轮对话中你提到的具体地点，自动将“过去/第一家/第一个/那里”消解并锁定为具体的真实地点，并立即调用 start_navigation 函数（destination 传入该具体地点名，travel_mode 传入用户指定的开/骑/步或默认 DRIVING）！
-   - 特别注意：如果前一轮推荐了多个地点，而用户后续直接说“导航过去”、“走吧”、“去那儿”但未指明哪一家时，你【绝对不要犹豫反问】，默认直接选定推荐的【第一家地点】作为 destination 立即调用 start_navigation！并在口语中直接回答“好的，已为您规划前往第一家[地点名]的路线”，确保 Demo 演示一气呵成！
-   - 如果用户指定了具体名字（例如“去Good Morning”）或说了“去第二个”，则立即调用 start_navigation 规划前往对应地点的路线！
-   - 严禁在已经有上下文推荐地点的背景下反问用户“您想去哪里”。直接规划并调用 start_navigation！
-【绝对禁令】系统内部开发技术提示（例如“界面会自动提供开车、骑行、步行供你选择”或“destination 传推荐地点”）仅供你理解架构，绝对【严禁】在文字或语音中念给用户听！只输出适合播报给人类听的自然亲切语言。
-回答口语化、简明亲切。`;
+    const sysPrompt = `你是极速响应的中文智能出行、美食生活与车载/AR语音助手。工具含 Google Search、Google Maps 及 start_navigation。
+【一、极速口语表达铁律（消除延迟与抢话碰撞）】
+- 全程使用自然地道的中文普通话简明作答，【严禁】任何废话寒暄开场白（如“没问题让我来帮您查找”），直接给出核心结论！
+- 每次语音回复控制在 2~3 句简短口语（约 40~75 字），语速干脆利落。
+- 【严禁口播内部格式尾巴】：向用户推荐 2~3 家地点时，直接口语说“第一家是[店名A]，……；第二家是[店名B]，……。您想去哪家？”说完立刻结束本轮播报，【绝对不要】在语音里朗读“推荐选项：A、B”！界面会自动从“第一家是A…第二家是B”实时生成一键导航按钮。
+- 【口语同音/近音容错纠偏】：结合当前城市商圈、餐饮与导航上下文自动纠正麦克风轻微近音识别偏差（如将“热午餐/热午茶”理解为“肉骨茶”、“松山”理解为“松发/中餐”、“避一下/避一家”理解为“第一家”、“没有玩游戏吧”结合上文美食对话理解为“那有粤菜吗？”），【严禁】切换到西班牙语或其他外语，也严禁脱离上下文机械字面尬聊！
+
+【二、用户当前精确出发点与就近检索铁律】
+- 当前起点：${landmark}（${regionName}，${addr}，纬度 ${lat}, 经度 ${lng}）。
+- 所有周边美食/咖啡/奶茶/景点推荐【必须】以此坐标为中心，优先步行（500米~1.5公里）或短途车程（1~3.5公里）内的近店，【严禁】推荐 10 公里外郊区分店（如在乌节路找蜜雪冰城优先约3公里的城联广场 CityLink 店或武吉士 Bugis 店）。
+
+【三、工具极速按需调度与零延迟多轮衔接】
+1) 闲聊、百科、翻译、数学推理：【严禁】调用任何工具，0 延迟原生直答。
+2) 实时天气/新闻/门票、周边餐馆商铺查询：按需调用 Google Search / Google Maps。
+3) 明确单一目的地导航（含复合提问如“查水幕秀时间并带我去最佳观赏点”）：立即在第一时间调用 start_navigation(destination="具体店名/地标", travel_mode="DRIVING")，口语一句话确认即可。
+4) 多候选推荐（如“推荐附近好吃的 / 有没有中餐 / 有没有西餐 / 那有粤菜吗”）：完整简短介绍 2 家高分近店并问“您想去哪家？”，【严禁】在用户选定前提前调用 start_navigation。
+5) 【跟进选店零搜索秒回】：当用户说出“去第一家/第二个/带我过去/走吧/直接导航”等指代上下文已提过的地点时，【绝对禁止重复调用 Google Search】，直接从对话记忆锁定对应店名（未指明第几家默认选第一家）并在第一时间调用 start_navigation，用不超过 25 字确认（如“好嘞，这就为您规划前往松发肉骨茶的路线！”）。`;
 
     // v90: 全双工引擎可用时启用服务端 VAD（开口即打断 START_OF_ACTIVITY_INTERRUPTS）+ 会话续接 + 上下文滑窗压缩；
     //      不支持 AudioWorklet 的浏览器沿用手动轮次（文字 / Web Speech 退路）
@@ -2145,7 +2152,8 @@ function connect() {
 
     const genConfig = {
       responseModalities: ["AUDIO"],
-      temperature: 0
+      temperature: 0,
+      speechConfig: { languageCode: "cmn-CN" }
     };
     if (modelObj.thinkingLevel) {
       genConfig.thinkingConfig = { thinkingLevel: modelObj.thinkingLevel };
@@ -2302,6 +2310,7 @@ function connect() {
       // 服务端确认打断（用户开口 / 新文字指令）：清空本地播放队列；从这一刻起到达的音频属于新一轮，必须放行
       stopAllAudioPlayback();
       clearLateAudioGate("interrupted");
+      markModelBoundaryCleared();
       if (currentModelTranscript && !/（已打断）$/.test(currentModelTranscript)) {
         currentModelTranscript += "（已打断）";
         broadcastModelTranscript(currentModelTranscript);
@@ -2319,6 +2328,7 @@ function connect() {
       }
     }
     if (sc.outputTranscription && sc.outputTranscription.text) {
+      prepareFreshModelTurnIfNeeded();
       if (lateAudioGate.active && !lateAudioGate.untilTurnComplete) {
         clearLateAudioGate("model_output_started");
       }
@@ -2333,6 +2343,7 @@ function connect() {
     }
 
     if (sc.groundingMetadata) {
+      prepareFreshModelTurnIfNeeded();
       const gm = sc.groundingMetadata;
       lastTurnGroundingMeta = gm;
       if (gm.webSearchQueries && gm.webSearchQueries.length) {
@@ -2352,6 +2363,7 @@ function connect() {
 
     (sc.modelTurn && sc.modelTurn.parts || []).forEach(p => {
       if (p.text && !currentModelTranscript.includes(p.text)) {
+        prepareFreshModelTurnIfNeeded();
         if ($("modelBubble").textContent === "思考中…" || $("modelBubble").textContent === "正在收听…" || $("modelBubble").textContent === "正在思考与实时检索中…") {
           $("modelBubble").textContent = "";
         }
@@ -2361,11 +2373,15 @@ function connect() {
         tryRealtimeExtractAndRender(currentModelTranscript, sc.groundingMetadata);
         checkAndTriggerSmartNavigation(currentUserTranscript, currentModelTranscript, sc.groundingMetadata, false);
       }
-      if (p.inlineData && p.inlineData.data) playPcm(p.inlineData.data);
+      if (p.inlineData && p.inlineData.data) {
+        prepareFreshModelTurnIfNeeded();
+        playPcm(p.inlineData.data);
+      }
     });
 
     if (sc.turnComplete) {
       clearLateAudioGate("turnComplete");
+      markModelBoundaryCleared();
       sceneLock = false;
       updateDispatchUI();
       broadcastModelTranscript(currentModelTranscript);
@@ -2389,6 +2405,7 @@ function connect() {
     }
 
     if (m.toolCall) {
+      prepareFreshModelTurnIfNeeded();
       $("tagFunction").classList.remove("hidden");
       $("telemetryBox").classList.remove("hidden");
       $("telFcRow").classList.remove("hidden");
