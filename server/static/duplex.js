@@ -51,15 +51,15 @@
     mime: "audio/pcm;rate=16000",
 
     // 服务端 VAD（写入 setup.realtimeInputConfig）
-    startSensitivity: "START_SENSITIVITY_LOW", // 低起始灵敏度：屏蔽残余回声瞬态误打断，真人持续开口仍稳定触发 interrupted
-    endSensitivity: "END_SENSITIVITY_HIGH",
-    prefixPaddingMs: 300,             // 300ms 服务端前置填充，配合 200ms 净音预卷完整保留字头且不混入开口前外放语音
-    silenceDurationMs: 500,           // 500ms 停顿断句，兼顾自然换气与毫秒级极速响应（每轮立省 300ms 等待）
+    startSensitivity: "START_SENSITIVITY_HIGH", // 高起始灵敏度：客户端门限关闭时上行全零静音帧，开门瞬间服务端立即捕捉“额、有…”等句首轻音，绝不吞字头
+    endSensitivity: "END_SENSITIVITY_LOW",      // 低结束灵敏度：保护句首“额…”后的微停顿与句尾轻声语气词“吗？”，绝不中途截断
+    prefixPaddingMs: 500,             // 500ms 服务端前置填充，完整覆盖“额，有法餐吗？”的句首语气词与引导词
+    silenceDurationMs: 550,           // 550ms 停顿断句，兼顾句中自然停顿与极速响应
 
     // 客户端残余回声门限（仅在扬声器出声期间生效；扬声器静默时全量直通）
     gateOpenFrames: 3,                // 连续 3 帧 (120ms) 超阈立即开门
     gateHangoverFrames: 16,           // 施密特迟滞保持 640ms 不断字（彻底保护句中换气与清辅音谷值，严禁切碎句子）
-    preRollFrames: 5,                 // 开门瞬间仅补发最近 200ms (5帧)，并对起音前纯外放残音帧做 -20dB 压制（杜绝把开口前模型外放塞进用户句首！）
+    preRollFrames: 12,                // 开门瞬间回溯最近 480ms (12帧)：从最早人声起音帧（如“额”）前 80ms 起 100% 原幅上行，更早纯外放帧衰减 -24dB
     noiseRatio: 4.0,                  // 开门阈值 ≥ 本底噪声 × 4  (+12 dB)
     echoRatio: 2.0,                   // 开门阈值 ≥ 残余回声底 × 2.0 (+6 dB)
     absMin: 0.012,                    // 开门绝对下限 (拦截稳态外放残音，放行轻声人声)
@@ -366,6 +366,7 @@
   function openGate(rms, thr) {
     D.gateOpen = true; D.hangover = CFG.gateHangoverFrames; D.openPeak = rms; D.gateOpens++;
     D.gateOpenedAt = Date.now(); D.hardCutDone = false; D.postDuckSpeech = 0; D.postDuckQuiet = 0;
+    D.onsetBoostLeft = 10;
     flushPreRoll();
     duck(true);
     log("gate OPEN rms=", rms.toFixed(4), "thr=", thr.toFixed(4));
@@ -392,13 +393,21 @@
         const above = rms > thr;
         if (!D.gateOpen) {
           D.speechRun = above ? D.speechRun + 1 : 0;
-          // 双讲破门保护：WebRTC AEC 在扬声器大声播报同时人声开口（Double-Talk）时常把人声压低到 0.011~0.040；
-          // 真人说话连续 ≥3 帧（120ms）稳定高于 max(0.011, noiseFloor×3.5) 即自适应开门，配合 200ms 净音预卷完整保留字头
-          const dtSustained = !above && rms >= Math.max(0.011, D.noiseFloor * 3.5);
-          D.dtRun = dtSustained ? D.dtRun + 1 : 0;
-          if (D.speechRun >= CFG.gateOpenFrames || D.dtRun >= 3) {
-            if (D.dtRun >= 3) D.echoFloor = Math.min(D.echoFloor, rms * 0.75);
+          // 双讲破门保护：消除 above 与 dtSustained 互斥重置漏洞（防止“额…有法餐吗”因振幅跨过 thr 来回把两个计数器互相归零）；
+          // 真人说话连续 ≥3 帧（120ms）高于 max(0.0085, noiseFloor×2.8) 即开门，且容忍“额”与“有”之间 ≤6 帧（240ms）思考微停顿（dtDip）！
+          const dtSustained = above || rms >= Math.max(0.0085, D.noiseFloor * 2.8);
+          if (dtSustained) {
+            D.dtRun = (D.dtRun || 0) + 1;
+            D.dtDip = 0;
+          } else if (D.dtRun > 0 && rms >= 0.0045 && (D.dtDip || 0) < 6) {
+            D.dtDip = (D.dtDip || 0) + 1;
+          } else {
             D.dtRun = 0;
+            D.dtDip = 0;
+          }
+          if (D.speechRun >= CFG.gateOpenFrames || D.dtRun >= 3) {
+            if (D.dtRun >= 3 && !above) D.echoFloor = Math.min(D.echoFloor, rms * 0.75);
+            D.dtRun = 0; D.dtDip = 0;
             openGate(rms, thr);
           } else {
             // 未开门：用静音帧占位（保持上行流连续，供服务端 VAD 计时）。
@@ -436,7 +445,7 @@
       }
     } else {
       // 扬声器静默：全量直通，由服务端 VAD 全权判定；同时学习本底噪声
-      D.gateOpen = false; D.speechRun = 0;
+      D.gateOpen = false; D.speechRun = 0; D.dtRun = 0; D.dtDip = 0;
       if (D.hardCutDone && D.duckTimer && rms > Math.max(D.noiseFloor * 3.0, CFG.holdMin || 0.011)) {
         // 扬声器已由 localHardCut 彻底切断并进入静默期，此时仍持续检测到人声能量 → 100% 物理确认为真人说话，撤销 2s 误报回滚计时并复位主音量
         confirmBargeIn("post_cut_speech");
@@ -447,7 +456,7 @@
     }
 
     if (!forward) {
-      D.preRoll.push({ pcm: msg.pcm, active: (D.speechRun > 0 || D.dtRun > 0) });
+      D.preRoll.push({ pcm: msg.pcm, rms: rms, active: (rms >= Math.max(0.0085, D.noiseFloor * 2.8) || D.speechRun > 0 || D.dtRun > 0) });
       if (D.preRoll.length > CFG.preRollFrames) D.preRoll.shift();
       D.framesGated++;
       sendAudioB64(SILENCE_B64);
@@ -455,16 +464,25 @@
     }
     D.preRoll.length = 0;
     D.framesSent++;
-    sendAudioB64(b64(msg.pcm));
+    let outPcm = msg.pcm;
+    if ((D.onsetBoostLeft || 0) > 0) {
+      D.onsetBoostLeft--;
+      if (rms >= 0.008 && rms < 0.022) {
+        outPcm = scalePcmBuffer(msg.pcm, Math.min(2.2, 0.024 / rms));
+      }
+    }
+    sendAudioB64(b64(outPcm));
   }
 
-  function attenuateEchoBuffer(buf, gain) {
+  function scalePcmBuffer(buf, gain) {
     try {
       const src = new Int16Array(buf);
       const out = new Int16Array(src.length);
       for (let i = 0; i < src.length; i++) {
         let v = Math.round(src[i] * gain);
-        if (v === 0 && src[i] !== 0) v = src[i] > 0 ? 1 : -1;
+        if (v > 32767) v = 32767;
+        else if (v < -32768) v = -32768;
+        else if (v === 0 && src[i] !== 0) v = src[i] > 0 ? 1 : -1;
         out[i] = v;
       }
       return out.buffer;
@@ -477,13 +495,19 @@
     for (let i = 0; i < n; i++) {
       if (D.preRoll[i] && D.preRoll[i].active) { firstActive = i; break; }
     }
-    // 仅保留人声起音前 1 帧 (40ms) 辅音前导 + 全部人声起音帧 (active=true) 原幅上行；
-    // 更早的纯外放残音帧衰减 -20dB (0.1x)，彻底杜绝把开口前扬声器里的模型语音拼进用户句首！
+    // 保留从最早人声起音帧（如“额…”）前 1 帧 (40ms) 起的全部预卷帧，并对轻声犹豫起音（0.008 ≤ rms < 0.022）做自动增益补偿至 0.024 RMS；
+    // 更早的纯外放残音帧衰减 -24dB (0.06x)，兼顾“句首‘额，有’一字不漏”与“杜绝外放语音混入句首”！
     const cleanStart = Math.max(0, firstActive - 1);
     for (let i = 0; i < n; i++) {
       const item = D.preRoll[i];
       const rawBuf = (item && item.pcm) ? item.pcm : item;
-      const outBuf = (i < cleanStart) ? attenuateEchoBuffer(rawBuf, 0.1) : rawBuf;
+      const fRms = (item && typeof item.rms === "number") ? item.rms : 0;
+      let outBuf = rawBuf;
+      if (i < cleanStart) {
+        outBuf = scalePcmBuffer(rawBuf, 0.06);
+      } else if (fRms >= 0.008 && fRms < 0.022) {
+        outBuf = scalePcmBuffer(rawBuf, Math.min(2.2, 0.024 / fRms));
+      }
       sendAudioB64(b64(outBuf));
       D.framesSent++;
     }

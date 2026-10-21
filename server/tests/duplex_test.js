@@ -768,8 +768,10 @@ const MODEL_TEXT = "为您推荐两个打卡点：第一家是滨海湾花园，
   // ---------------- T22 防扬声器回声自打断 + 多轮双讲语音打断守护（3.8 Live） ----------------
   {
     const h = makeHarness();
-    assert("T22a 服务端 VAD 起始灵敏度必须为 START_SENSITIVITY_LOW（防止残音触发 interrupted）",
-      h.D().setupExtras().realtimeInputConfig.automaticActivityDetection.startOfSpeechSensitivity === "START_SENSITIVITY_LOW");
+    assert("T22a 服务端 VAD 启用 START_SENSITIVITY_HIGH + END_SENSITIVITY_LOW + 500ms 前置缓冲（防漏掉‘额，有’句首与‘吗’句尾）",
+      h.D().setupExtras().realtimeInputConfig.automaticActivityDetection.startOfSpeechSensitivity === "START_SENSITIVITY_HIGH" &&
+      h.D().setupExtras().realtimeInputConfig.automaticActivityDetection.endOfSpeechSensitivity === "END_SENSITIVITY_LOW" &&
+      h.D().setupExtras().realtimeInputConfig.automaticActivityDetection.prefixPaddingMs === 500);
     await h.D().start("console");
     assert("T22b 门限上下界合理（absMin ≥ 0.012 且 maxThreshold ≤ 0.06，绝不锁死双讲人声）",
       h.D().CFG.absMin >= 0.012 && h.D().CFG.maxThreshold <= 0.06);
@@ -902,14 +904,14 @@ const MODEL_TEXT = "为您推荐两个打卡点：第一家是滨海湾花园，
       hRace.calls.userBroadcasts.at(-1) === "那有粤菜吗？",
       "sources=" + hRace.g().activeAudioSources.size + " model=" + hRace.g().currentModelTranscript + " user=" + JSON.stringify(hRace.calls.userBroadcasts));
 
-    // T23d: 静态配置核验：锁定中文 cmn-CN 防西语幻觉 + 500ms 极速静音断句 + 5帧(200ms)净音预卷防外放残响污染句首
-    assert("T23d setup 锁定 speechConfig.languageCode = cmn-CN 且 VAD silenceDurationMs ≤ 550ms 且 preRollFrames === 5",
+    // T23d: 静态配置核验：锁定中文 cmn-CN 防西语幻觉 + 550ms 静音断句 + 12帧(480ms)净音预卷防漏句首语气词
+    assert("T23d setup 锁定 speechConfig.languageCode = cmn-CN 且 VAD silenceDurationMs ≤ 550ms 且 preRollFrames === 12",
       /speechConfig:\s*\{\s*languageCode:\s*"cmn-CN"\s*\}/.test(appSrc) &&
       hRace.D().CFG.silenceDurationMs <= 550 &&
-      hRace.D().CFG.preRollFrames === 5);
+      hRace.D().CFG.preRollFrames === 12);
 
     // T24: 根治“在模型说话时打断首词必错（西班牙菜有吗→芝麻油菜有吗）”声学双凶（v109）：
-    //   1) 播报期间开口前 2s 的纯外放帧在 preRoll 中必须被压制 -20dB (0.1x)，绝不把模型自己的外放语音原幅拼进用户句首；
+    //   1) 播报期间开口前 2s 的纯外放帧在 preRoll 中必须被压制 -24dB (0.06x)，绝不把模型自己的外放语音原幅拼进用户句首；
     //   2) 用户开口第 4 帧（160ms，postDuckSpeech >= 1）立即触发 localHardCut() 彻底切断扬声器（无需再等 500ms），让后续语音在 0 外放干扰下纯净采集！
     const hCut = makeHarness();
     await hCut.D().start("console");
@@ -926,6 +928,23 @@ const MODEL_TEXT = "为您推荐两个打卡点：第一家是滨海湾花园，
     hCut.pushFrame(0.035);
     assert("T24c 第 4 帧 (160ms) postDuckSpeech>=1 立即触发 localHardCut 彻底切断扬声器 (activeAudioSources=0)，无需苦等 500ms",
       hCut.D().hardCutDone === true && hCut.g().activeAudioSources.size === 0);
+
+    // T25: 根治“额，有法餐吗？/ 额，有中餐吗？漏掉句首‘额，有’”与“普通话腔调怪异”（v110）：
+    //   1) 用户说“额（rms 0.012→0.025 跨越 thr）+ 1帧微停顿（0.006）+ 有（0.014）”时，dtRun 绝不因跨越 thr 或 1 帧微停顿而归零，第 4 帧即破门且完整保留“额”字！
+    //   2) generationConfig.temperature 锁定为 0.25（稳住普通话四声声调），且系统提示词强制优先使用中文店名（珍宝海鲜、御宝轩、乐天味之楼），禁绝“这片儿/口碑王/翻牌子”怪异词！
+    const hHes = makeHarness();
+    await hHes.D().start("console");
+    hHes.set.sceneLock(true);
+    hHes.F.playPcm(hHes.pcm(3000));
+    hHes.pushFrame(0.012); // “额”帧 1（低于 thr 0.020，高于 0.0085）
+    hHes.pushFrame(0.025); // “额”帧 2（高于 thr 0.020，旧版因 !above 会把 dtRun 误清零！）
+    hHes.pushFrame(0.006); // “额”与“有”之间 1 帧微停顿（dtDip 保护不归零）
+    hHes.pushFrame(0.014); // “有”帧 1（累计第 3 帧有效语音 → 立即开门！）
+    assert("T25a ‘额…有法餐吗’跨越阈值 + 1帧微停顿不归零，在‘有’字起音瞬间即成功开门", hHes.D().gateOpen === true);
+    assert("T25b 锁定 temperature=0.25 稳住普通话发音，且提示词禁用怪异词并强制中文化店名",
+      /temperature:\s*0\.25/.test(appSrc) &&
+      /珍宝海鲜/.test(appSrc) && /御宝轩/.test(appSrc) && /乐天味之楼/.test(appSrc) &&
+      /【绝对禁止】使用“这片儿”、“口碑王”/.test(appSrc));
   }
 
   console.log("\n" + passed + " passed, " + failed + " failed");
