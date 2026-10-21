@@ -59,7 +59,7 @@
     // 客户端残余回声门限（仅在扬声器出声期间生效；扬声器静默时全量直通）
     gateOpenFrames: 3,                // 连续 3 帧 (120ms) 超阈立即开门
     gateHangoverFrames: 16,           // 施密特迟滞保持 640ms 不断字（彻底保护句中换气与清辅音谷值，严禁切碎句子）
-    preRollFrames: 15,                // 开门瞬间完整补发前 600ms 原始 PCM（100% 保留句首字头，零吞字）
+    preRollFrames: 20,                // 开门瞬间完整补发前 800ms 原始 PCM（100% 保留句首轻读字头如“有没有/附近”，零吞字）
     noiseRatio: 4.0,                  // 开门阈值 ≥ 本底噪声 × 4  (+12 dB)
     echoRatio: 2.0,                   // 开门阈值 ≥ 残余回声底 × 2.0 (+6 dB)
     absMin: 0.012,                    // 开门绝对下限 (拦截稳态外放残音，放行轻声人声)
@@ -392,12 +392,12 @@
         const above = rms > thr;
         if (!D.gateOpen) {
           D.speechRun = above ? D.speechRun + 1 : 0;
-          // 双讲破门保护：WebRTC AEC 在扬声器大声播报同时人声开口（Double-Talk）时常把人声压低到 0.014~0.040；
-          // 真人说话连续 ≥5 帧（200ms）稳定高于 max(0.013, noiseFloor×4) 即自适应开门，并配合 600ms preRoll 完整补齐字头
-          const dtSustained = !above && rms >= Math.max(0.013, D.noiseFloor * 4);
+          // 双讲破门保护：WebRTC AEC 在扬声器大声播报同时人声开口（Double-Talk）时常把人声压低到 0.011~0.040；
+          // 真人说话连续 ≥4 帧（160ms）稳定高于 max(0.011, noiseFloor×3.5) 即自适应开门，并配合 800ms preRoll 完整补齐字头
+          const dtSustained = !above && rms >= Math.max(0.011, D.noiseFloor * 3.5);
           D.dtRun = dtSustained ? D.dtRun + 1 : 0;
-          if (D.speechRun >= CFG.gateOpenFrames || D.dtRun >= 5) {
-            if (D.dtRun >= 5) D.echoFloor = Math.min(D.echoFloor, rms * 0.75);
+          if (D.speechRun >= CFG.gateOpenFrames || D.dtRun >= 4) {
+            if (D.dtRun >= 4) D.echoFloor = Math.min(D.echoFloor, rms * 0.75);
             D.dtRun = 0;
             openGate(rms, thr);
           } else {
