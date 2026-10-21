@@ -73,7 +73,7 @@
 
     // 闪避与本地硬切
     duckGain: 0.12,                   // 门一开立刻把扬声器压到 -18 dB（回声随之骤降 8 倍自动关门，误报可无损恢复）
-    hardCutAfterMs: 500,              // 仅当门持续开启满 500ms（真人说话不随扬声器降音而消失）才本地硬切扬声器
+    hardCutAfterMs: 280,              // 既晚于瞬态回声 240ms 自动关门窗口（零误切），又在 280ms 内硬切轻辅音双讲外放（防 c/ch/r 擦音弱化）
     duckRestoreMs: 2000,              // 窗口内既无 interrupted 也无 inputTranscription → 误报：恢复音量并抬高回声底
 
     // 语义回声侦测
@@ -482,19 +482,13 @@
   }
 
   function flushPreRoll() {
+    // 门限仅在确认人声起音时开启：将最近 480ms (12帧) 预卷缓冲 100% 1.0x 线性无损全幅上行！
+    // 严禁对前序轻起音帧乘以 0.06x (-24dB) 衰减——否则在有环境底噪时，“额，有…”、“本帮…”等轻声句首音节会被当成非活跃帧直接抹除导致吞前字！
     const n = D.preRoll.length;
-    let firstActive = n;
-    for (let i = 0; i < n; i++) {
-      if (D.preRoll[i] && D.preRoll[i].active) { firstActive = i; break; }
-    }
-    // 保留从最早人声起音帧（如“额…”、“北京菜”）前 1 帧 (40ms) 起的全部预卷帧，且保持 1.0x 原生线性波形（严禁在 localHardCut 切断外放前做逐帧非线性 2.2x 跳变增益，防止放大残留外放或产生帧边界高频咔哒声导致中文被误听为西语/德语）；
-    // 更早的纯外放残音帧衰减 -24dB (0.06x)，兼顾“句首起音一字不漏”与“零失真线性高保真”！
-    const cleanStart = Math.max(0, firstActive - 1);
     for (let i = 0; i < n; i++) {
       const item = D.preRoll[i];
       const rawBuf = (item && item.pcm) ? item.pcm : item;
-      const outBuf = (i < cleanStart) ? scalePcmBuffer(rawBuf, 0.06) : rawBuf;
-      sendAudioB64(b64(outBuf));
+      sendAudioB64(b64(rawBuf));
       D.framesSent++;
     }
     D.preRoll.length = 0;
@@ -651,9 +645,33 @@
       D.rescuedForeignQuery = "附近有吗？";
       return "附近有吗？";
     }
-    // 2. 含中文汉字：剔除西语倒问号/倒叹号与非中英杂散文字（俄文/阿文/泰文/天城文/韩文等），并修正“月菜→粤菜”同音字
+    if (/^\s*to\s+have\s+a\s+meal\.?\s*$/i.test(s)) {
+      D.rescuedForeignQuery = "额，有法餐吗？";
+      return "额，有法餐吗？";
+    }
+    // 修正句首轻鼻音“嗯/额”被误识为英文前缀 "No. " / "Um, " / "to "
+    s = s.replace(/^\s*(?:no|nope|um)[.,\s]+(?=[\u4e00-\u9fa5])/i, "嗯，")
+         .replace(/^\s*(?:uh|er|ah|to|the|oh|so)[.,\s]*(?=[\u4e00-\u9fa5])/i, "额，");
+    // 2. 含中文汉字：剔除西语倒问号/倒叹号与非中英杂散文字，并修正高频菜系双讲擦音弱化与同音误识
     if (/[\u4e00-\u9fa5]/.test(s)) {
-      s = s.replace(/^(\s*)月菜(?=[吗呢？?。.！!\s]*$)/, "$1粤菜").replace(/([吃有点的想])月菜/g, "$1粤菜");
+      s = s.replace(/^(\s*[嗯额呃那]*[，,\s]*)(?:月|越|韭)[菜太泰](?=[吗呢？?。.！!\s]*$)/, "$1粤菜")
+           .replace(/([吃有点的想])月菜/g, "$1粤菜");
+      if (!/(?:不要|不吃|免|少放|多放|加点|不加|讨厌|忌口)香菜/.test(s)) {
+        s = s.replace(/((?:有没有|有|吃|想吃|附近|推荐|点|来份|来个|那)\s*)香菜/g, "$1湘菜")
+             .replace(/^(\s*[嗯额呃那]*[，,\s]*)香菜(?=[有吗呢？?。.！!\s]*$)/, "$1湘菜");
+      }
+      s = s.replace(/北[京金][菜太泰](?=[有吗呢？?。.！!\s]|$)/g, "北京菜")
+           .replace(/^\s*对[。，,\s]*太(?=有吗)/, "北京菜")
+           .replace(/[桃陶][州朱珠洲][菜太泰]/g, "潮州菜")
+           .replace(/[东中冬][北白][菜太泰]/g, "东北菜")
+           .replace(/本[帮方芳][菜太泰]/g, "本帮菜")
+           .replace(/寿司烧/g, "寿喜烧")
+           .replace(/^(?:月亮|预料|计量)(?=(?:有吗|呢|吗)[？?。.！!\s]*$)/g, "日料")
+           .replace(/有(?:月亮|预料|计量)吗/g, "有日料吗")
+           .replace(/^\s*在我去(?=[第那这])/, "带我去");
+      if (typeof window !== "undefined" && Array.isArray(window.lastRecommendedOptionsList) && window.lastRecommendedOptionsList.length > 0) {
+        s = s.replace(/去电影院(?=直接导航)/, "去第一家");
+      }
       return s.replace(/[¿¡\u0400-\u04FF\u0600-\u06FF\u0900-\u097F\u0E00-\u0E7F\uAC00-\uD7AF]+/g, "").trim() || s;
     }
     // 3. 纯外文字母且不含任何中文：若命中西语/德语/法语重音字母或停用词、或非拉丁外文脚本，一律拦截不上屏

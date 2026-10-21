@@ -1986,7 +1986,16 @@ function applyCityToMap() {
   }
 
   exitNavigation();
+  stopAllAudioPlayback();
+  if (typeof window !== "undefined" && window.DuplexVoice && typeof window.DuplexVoice.bargeIn === "function") {
+    try { window.DuplexVoice.bargeIn("city_change"); } catch (e) {}
+  }
   lastRecommendedDestination = "";
+  window.lastRecommendedOptionsList = [];
+  lastRenderedOptionsKey = "";
+  currentUserTranscript = "";
+  currentModelTranscript = "";
+  renderRecommendationOptions([]);
   if ($("text")) $("text").value = "";
   if ($("mobSearchInput")) $("mobSearchInput").value = "";
   if ($("astInputText")) $("astInputText").value = "";
@@ -2198,8 +2207,10 @@ function connect() {
 - 【中文短句防外语谐音误听（“北京菜有吗”严禁当成西语“cajero”）】：
   1) 当用户问“北京菜有吗？”（或因短音频被误听为西班牙语谐音“¿Hay un cajero?”、“cajero”）：100% 是在问附近有没有【北京菜/京味菜/北京烤鸭】（【绝对禁止】当成西班牙语 ATM 取款机！），立即用中文推荐乌节路附近的京味名店，如百丽宫的“御宝至尊烤鸭店”（招牌正宗北京片皮鸭）和义安城的“同乐经典”（招牌北京烤鸭与传统京菜）。
   2) 当用户问“粤菜”、“那广东菜呢？”（或被误听为“Ja.”、“Hola, soy Guangdong”）：100% 是在问【粤菜/广东菜】，立即用中文推荐“御宝轩”、“华厅餐厅”、“翡翠金阁”或“夏宫”。
-  3) 当用户问“我想吃湖北菜”、“川菜”、“湘菜”、“本帮菜”等中国地方菜系：优先用中文推荐附近对应的中餐厅或风味相近的川湘/江浙名店（如百丽宫的“翡翠金阁”或义安城的“御宝轩”、“同乐经典”），【绝对禁止】用西班牙语或外语回答！
-- 【简短菜系追问 = 推荐餐厅】：在餐饮/地点探索语境下，当用户说“额，有中餐吗？”、“中餐”、“法餐吗？”、“额，有法餐吗？”、“日料呢？”，100% 是在问“附近有什么该菜系的餐厅推荐？”，必须立即检索并推荐 2 家附近该菜系高分餐厅，【严禁】当成百科名词解释！
+  3) 当用户问“我想吃湖北菜”、“川菜”、“湘菜”、“本帮菜”等中国地方菜系：优先用中文推荐附近对应的中餐厅或风味相近的川湘/江浙名店（如乌节路的“湘香湖南菜”、“农耕记”、百丽宫的“翡翠金阁”或义安城的“御宝轩”、“同乐经典”），【绝对禁止】用西班牙语或外语回答！
+  4) 【同音字“香菜 = 湘菜（湖南菜）”铁律】：当用户在探店/问菜系时被识别为“有没有香菜？”、“香菜有吗？”、“我想吃香菜”（未明确说“不要/不吃/免香菜”），因“湘菜”与“香菜”拼音四声完全相同（xiāng cài），100% 是在问【湘菜（湖南菜）】餐厅推荐（如“湘香湖南菜”或“农耕记”），【绝对禁止】当成调味蔬菜“香菜（芫荽）”去解释菜里能不能不放香菜！
+  5) 【双讲擦音弱化与多轮菜系声学消歧】：当用户在连续询问多国/地方菜系（如中餐、法餐、西班牙菜、川菜、湘菜等）时，若因播报外放双讲出现齿龈擦音/卷舌音弱化（如“陶朱泰/桃州太”=【潮州菜】、“中白菜/东白太”=【东北菜】、单说“韭菜/月菜”=【粤菜】、或在刚问完各国正餐菜系后紧接着追问“饮料有吗/预料有吗/计量有吗/月亮有吗”且原始音频声母带卷舌 rì liào 特征），请优先还原为对应的真实菜系（如【日料/日本料理】，推荐千两、明石等 2 家高分日料店）！
+- 【简短菜系追问 = 推荐餐厅】：在餐饮/地点探索语境下，当用户说“额，有中餐吗？”、“中餐”、“法餐吗？”、“额，有法餐吗？”、“日料呢？”（或近音“月亮有吗？”→“日料有吗？”），100% 是在问“附近有什么该菜系的餐厅推荐？”，必须立即检索并推荐 2 家附近该菜系高分餐厅，【严禁】当成百科名词解释！
 - 【句首吞字还原（“没有法餐” = “有没有法餐”）】：句首轻读时若被转写为“没有法餐”、“没有西餐”、“福临有没有肉骨茶”，在美食上下文中【必须】还原为“附近有没有[该菜系/食物]推荐？”，立即推荐对应餐厅。
 - 【播报打断首词抗噪与跨国菜系还原】：播报中打断若出现近音（如“芝麻油菜有吗”→“西班牙菜有吗”、“啊我在有吗”→“法国菜有吗”、“黑脸一点/和医院一点”→“可以远一点”），立即按真实意图检索推荐。
 - 【当用户嫌慢或催促“快点/太慢了”】：直接干脆回应并承接上文（如：“好的，我加快语速！刚才说的两家店您看去哪家，还是换个口味？”）。
@@ -2234,13 +2245,14 @@ function connect() {
     }
 
     const inputTranscriptionConfig = {
-      languageCodes: ["cmn-Hans-CN", "zh-CN", "en-US"],
+      languageCodes: ["cmn-Hans-CN", "zh-CN"],
       customVocabulary: [
-        "北京菜", "粤菜", "广东菜", "湖北菜", "川菜", "湘菜", "江浙菜",
+        "北京菜", "粤菜", "广东菜", "湖北菜", "川菜", "湘菜", "湖南菜", "江浙菜",
         "本帮菜", "潮州菜", "东北菜", "福建菜", "徽菜", "鲁菜", "西北菜",
         "新疆菜", "云南菜", "贵州菜", "台湾菜", "客家菜", "海南鸡饭",
-        "肉骨茶", "火锅", "中餐", "法餐", "西班牙菜", "意大利菜", "日料",
-        "韩餐", "泰国菜", "越南菜", "印度菜", "西餐", "北京烤鸭"
+        "肉骨茶", "火锅", "中餐", "法餐", "西班牙菜", "意大利菜", "日料", "日本料理",
+        "韩餐", "泰国菜", "越南菜", "印度菜", "西餐", "北京烤鸭", "湘香湖南菜", "农耕记",
+        "寿喜烧", "第一家", "第二家", "第三家", "直接导航", "带我去第一家", "去第二家"
       ]
     };
 
@@ -2408,6 +2420,26 @@ function connect() {
         broadcastModelTranscript(currentModelTranscript);
       }
     }
+    function resolveOrdinalOptionFromUserText(uText) {
+      const list = (typeof window !== "undefined" && Array.isArray(window.lastRecommendedOptionsList))
+        ? window.lastRecommendedOptionsList
+        : [];
+      const liveText = (typeof window !== "undefined" && window.DuplexVoice && window.DuplexVoice.turnAsr)
+        ? window.DuplexVoice.turnAsr
+        : uText;
+      if (!liveText || !list.length) return "";
+      if (/第\s*[二2２]\s*[家个处座间]?/.test(liveText) && list[1]) {
+        return list[1].destination || list[1].name || "";
+      }
+      if (/第\s*[三3３]\s*[家个处座间]?/.test(liveText) && list[2]) {
+        return list[2].destination || list[2].name || "";
+      }
+      if (/第\s*[一1１]\s*[家个处座间]?/.test(liveText) && list[0]) {
+        return list[0].destination || list[0].name || "";
+      }
+      return "";
+    }
+
     if (sc.inputTranscription && sc.inputTranscription.text) {
       window.__foreignRescueSent = false;
       if (duplexReady()) {
@@ -2424,6 +2456,21 @@ function connect() {
           currentUserTranscript = cleanUser;
           broadcastUserTranscript(currentUserTranscript);
         }
+      }
+      if (window.__pendingToolAsrWaiter) {
+        const w = window.__pendingToolAsrWaiter;
+        window.__pendingToolAsrWaiter = null;
+        w();
+      }
+      // 关键竞态修正：若服务端 m.toolCall 早于 sc.inputTranscription 到达，且打断截断导致服务端把“去第二家”误传成了第一家，
+      // 一旦用户真实字幕确认说的是“第二家/第三家/第一家”，立即精准纠偏对齐到屏幕对应序号的候选餐厅！
+      const ordDest = resolveOrdinalOptionFromUserText(currentUserTranscript);
+      if (ordDest && isValidDestinationName(ordDest) && dispatchState.hasFc && activeDestination && !isSameDestination(ordDest, activeDestination)) {
+        console.log("[OrdinalFix] 根据用户真实语音序数词纠偏导航目标:", activeDestination, "->", ordDest);
+        lastRecommendedDestination = ordDest;
+        dispatchState.fcArgs = `start_navigation("${ordDest}", travel_mode="${selectedTravelMode || "DRIVING"}")`;
+        updateDispatchUI();
+        prepareRouteAndModeSelection(ordDest, selectedTravelMode || "DRIVING");
       }
     }
     if (sc.outputTranscription && sc.outputTranscription.text) {
@@ -2519,9 +2566,31 @@ function connect() {
       $("tagFunction").classList.remove("hidden");
       $("telemetryBox").classList.remove("hidden");
       $("telFcRow").classList.remove("hidden");
+      // 若语音会话中存在屏幕推荐项，且 m.toolCall 比本轮 sc.inputTranscription 早到了几毫秒（turnAsr 尚为空），最多等 90ms（ASR 一到立即 0ms 唤醒），确保第一次 toolResponse 就携带精准序数店名，杜绝地图与语音店名不一致！
+      if (duplexMicOn() &&
+          !(window.DuplexVoice && window.DuplexVoice.turnAsr) &&
+          typeof window !== "undefined" &&
+          Array.isArray(window.lastRecommendedOptionsList) &&
+          window.lastRecommendedOptionsList.length > 0) {
+        await new Promise(resolve => {
+          const timer = setTimeout(() => {
+            if (window.__pendingToolAsrWaiter) window.__pendingToolAsrWaiter = null;
+            resolve();
+          }, 90);
+          window.__pendingToolAsrWaiter = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+        });
+      }
       renderRecommendationOptions([]); // 触发函数调用（如导航规划）时，立即清除候选推荐按键！
       (m.toolCall.functionCalls || []).forEach(fc => {
         let dest = (fc.args && fc.args.destination) || "";
+        // 若用户明确说了“第一家/第二家/第三家”，优先以屏幕上实际展示给用户的候选按钮序号为准（防止播报中途打断导致服务端截断错位）
+        const explicitOrd = resolveOrdinalOptionFromUserText(currentUserTranscript);
+        if (explicitOrd && isValidDestinationName(explicitOrd)) {
+          dest = explicitOrd;
+        }
         // 关键：智能代词消解与上下文目的地回退 (针对“导航过去/去那儿/第一家/第一个”)
         if (!dest || !isValidDestinationName(dest)) {
           dest = lastRecommendedDestination || activeDestination || (currentCity.shortName ? (currentCity.shortName + " 核心商圈") : "ION Orchard");
@@ -2550,7 +2619,18 @@ function connect() {
           expectedUiFc = null;
         }
         ws.send(JSON.stringify({toolResponse: {functionResponses: [
-          {id: fc.id, name: fc.name, response: {result: {status: "ok"}}}]}}));
+          {
+            id: fc.id,
+            name: fc.name,
+            response: {
+              result: {
+                status: "ok",
+                destination: dest,
+                travel_mode: preferredMode,
+                spoken_confirmation_hint: `路线已规划至「${dest}」，请务必在语音回复中准确说出「${dest}」（严禁说成其他店名）！`
+              }
+            }
+          }]}}));
       });
     }
   };
@@ -4310,8 +4390,8 @@ const OPT_MAX_ITEMS = 3;
 // 候选名称绝不跨越的硬分隔符（括号内除外）
 const OPT_HARD_DELIM_RE = /[，,。；;！!？?：:、\n\r]/;
 
-// 名称字符类：中/英/数字/常见连接符/空格（不含任何标点分隔符）
-const OPT_NAME_SRC = "[\\u4e00-\\u9fa5\\u3040-\\u30ff\\uac00-\\ud7afA-Za-z0-9&'’\\.\\-·\\s]";
+// 名称字符类：中/英（含法语/西语重音字母）/数字/常见连接符/空格（不含任何标点分隔符）
+const OPT_NAME_SRC = "[\\u4e00-\\u9fa5\\u3040-\\u30ff\\uac00-\\ud7afA-Za-z\\u00c0-\\u00ff0-9&+'’\\.\\-·\\s]";
 
 // 序数/排序口语标记 → 排名（左侧优先匹配，"另一个是" 会先于其中的 "一个是" 命中）
 const OPT_ORDINAL_MARKERS = [

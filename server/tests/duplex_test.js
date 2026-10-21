@@ -950,17 +950,24 @@ const MODEL_TEXT = "为您推荐两个打卡点：第一家是滨海湾花园，
     //   1) 协议层锁定 inputAudioTranscription.languageCodes = ["cmn-Hans-CN", "zh-CN", "en-US"] + customVocabulary 菜系词表；
     //   2) 客户端 sanitizeAllowedLanguageAsr 精准拦截小语种幻觉并还原中文菜系谐音；
     //   3) 主模型若意外吐出西语 outputTranscription，立即切断外语音频并用还原后的中文重发！
-    assert("T26a 协议层锁定 inputAudioTranscription.languageCodes=['cmn-Hans-CN','zh-CN','en-US'] 及中餐菜系 customVocabulary",
-      /languageCodes:\s*\[\s*"cmn-Hans-CN"\s*,\s*"zh-CN"\s*,\s*"en-US"\s*\]/.test(appSrc) &&
-      /customVocabulary:\s*\[[\s\S]*?"北京菜"[\s\S]*?"粤菜"[\s\S]*?"广东菜"[\s\S]*?"湖北菜"/.test(appSrc));
+    assert("T26a 协议层锁定纯中文 inputAudioTranscription.languageCodes=['cmn-Hans-CN','zh-CN']（移除 en-US 防鼻音英文幻觉）及中餐菜系 customVocabulary",
+      /languageCodes:\s*\[\s*"cmn-Hans-CN"\s*,\s*"zh-CN"\s*\]/.test(appSrc) &&
+      /customVocabulary:\s*\[[\s\S]*?"北京菜"[\s\S]*?"粤菜"[\s\S]*?"广东菜"[\s\S]*?"湖北菜"[\s\S]*?"湘菜"/.test(appSrc));
     const hLang = makeHarness();
     await hLang.D().start("console");
-    assert("T26b sanitizeAllowedLanguageAsr 精准还原 ‘¿Hay un cajero?’→‘北京菜有吗？’、‘Ja.’→‘粤菜’、‘Hola, soy Guangdong’→‘那广东菜呢？’，并放行正常中英文",
+    assert("T26b sanitizeAllowedLanguageAsr 精准还原西语/德语/鼻音英语及菜系同音误识（cajero→北京菜、No.有没有香菜→嗯，有没有湘菜、北京太→北京菜、月亮有吗→日料有吗）",
       hLang.D().sanitizeAllowedLanguageAsr("¿Hay un cajero?") === "北京菜有吗？" &&
       hLang.D().sanitizeAllowedLanguageAsr("Ja.") === "粤菜" &&
       hLang.D().sanitizeAllowedLanguageAsr("Hola, soy Guangdong") === "那广东菜呢？" &&
-      hLang.D().sanitizeAllowedLanguageAsr("¿Dónde está?") === "附近有吗？" &&
-      hLang.D().sanitizeAllowedLanguageAsr("北京菜有吗？") === "北京菜有吗？" &&
+      hLang.D().sanitizeAllowedLanguageAsr("to have a meal") === "额，有法餐吗？" &&
+      hLang.D().sanitizeAllowedLanguageAsr("No. 有没有香菜?") === "嗯，有没有湘菜?" &&
+      hLang.D().sanitizeAllowedLanguageAsr("北京太有吗?") === "北京菜有吗?" &&
+      hLang.D().sanitizeAllowedLanguageAsr("对。太有吗?") === "北京菜有吗?" &&
+      hLang.D().sanitizeAllowedLanguageAsr("桃州太呢?") === "潮州菜呢?" &&
+      hLang.D().sanitizeAllowedLanguageAsr("本方太有吗?") === "本帮菜有吗?" &&
+      hLang.D().sanitizeAllowedLanguageAsr("月亮有吗?") === "日料有吗?" &&
+      hLang.D().sanitizeAllowedLanguageAsr("预料有吗?") === "日料有吗?" &&
+      hLang.D().sanitizeAllowedLanguageAsr("在我去第一家直接导航。") === "带我去第一家直接导航。" &&
       hLang.D().sanitizeAllowedLanguageAsr("take me to Marina Bay Sands") === "take me to Marina Bay Sands");
     await hLang.serverMsg({ serverContent: { inputTranscription: { text: "¿Hay un cajero?" } } });
     assert("T26c 服务端下发西语幻觉 ‘¿Hay un cajero?’ 时，用户气泡立即自愈显示为 ‘北京菜有吗？’",

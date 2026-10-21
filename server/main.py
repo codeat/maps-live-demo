@@ -594,6 +594,14 @@ async def auth_gate(request, handler):
     if path in ("/login", "/api/login", "/api/logout", "/healthz"):
         return await handler(request)
 
+    if is_authenticated(request):
+        # 已持有合法签名 Cookie 时：若地址栏仍带 ?key= 参数则直接 302 剥离明文参数，避免旧书签误计入失败锁 IP
+        if request.method == "GET" and "key" in request.query:
+            clean_q = [(k, v) for k, v in request.query.items() if k != "key"]
+            target = path + ("?" + urllib.parse.urlencode(clean_q) if clean_q else "")
+            raise web.HTTPFound(location=target)
+        return await handler(request)
+
     # 支持书签直达免输密：GET /?key=<PASSWORD> 验证通过后写 Cookie 并 302 剥离地址栏明文口令
     q_key = request.query.get("key", "")
     if q_key and request.method == "GET":
@@ -620,9 +628,6 @@ async def auth_gate(request, handler):
             log_event("ERROR", f"URL 密钥口令错误 ip={ip}", level="WARN")
             if res > 0:
                 return web.Response(status=429, text=f"429 Too Many Requests: IP locked for {res}s")
-
-    if is_authenticated(request):
-        return await handler(request)
 
     # 未授权拦截：API、WebSocket、配置接口一律 401 JSON，静态文件 401，页面访问 302 跳转至 /login
     if path.startswith("/api/") or path in ("/config", "/geo", "/ws") or request.method != "GET":
