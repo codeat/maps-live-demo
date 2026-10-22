@@ -88,6 +88,8 @@
     muteEchoTurnAfter: 2,             // 第 2 次起：该回声轮的模型回复静音（切断自环）
     strictAfter: 3,                   // 第 3 次起：严格模式（播报期间麦克风上行静音帧）
     aecUnhealthyDb: 15,               // 回声底比噪声底高出这么多 dB 视为该设备 AEC 漏得多（仅提示）
+    unansweredTurnMs: 2500,           // 用户已出字幕但上游 2.5s 仍 0 字节下行 → 自动补发 turnComplete 催答（不断麦）
+    reconnectStuckMs: 6500,           // 补发催答后又过 6.5s 仍 0 响应（上游半开死连接）→ 自动无感重连并重放提问
 
     debug: false
   };
@@ -125,11 +127,13 @@
     // 门限状态
     noiseFloor: 0.003, echoFloor: 0.006,
     speechRun: 0, dtRun: 0, hangover: 0, gateOpen: false, openPeak: 0, gateOpenedAt: 0, hardCutDone: false,
+    quietGateOpen: false, quietRun: 0, quietHangover: 0,
     preRoll: [],
     lastSpeakerBusyTs: 0,
     // 会话 / 轮次
     resumeHandle: null,
     voiceTurnOpen: false, turnAsr: "", turnShown: false, turnIsEcho: false, turnHadSpeaker: false, turnStartTs: 0,
+    turnNudged: false, turnNudgedAt: 0,
     prevUserText: "",
     holdTimer: null,
     lastInputTs: 0,
@@ -139,7 +143,8 @@
     curModelText: "", modelHistory: [], echoEvents: [], sinkEscalated: false,
     // 统计
     framesSent: 0, framesGated: 0, framesDropped: 0, gateOpens: 0, falseAlarms: 0, confirmed: 0,
-    hardCuts: 0, interrupts: 0, bargeIns: 0, echoTurns: 0, echoChunksDropped: 0, mutedEchoTurns: 0
+    hardCuts: 0, interrupts: 0, bargeIns: 0, echoTurns: 0, echoChunksDropped: 0, mutedEchoTurns: 0,
+    watchdogNudges: 0, watchdogReconnects: 0
   };
   window.DuplexVoice = D;
 
@@ -291,7 +296,9 @@
     D.echoFloor = Math.max(D.echoFloor || 0, 0.01);
     D.noiseFloor = Math.max(D.noiseFloor || 0, 0.003);
     D.gateOpen = false; D.speechRun = 0; D.preRoll = []; D.hardCutDone = false;
+    D.quietGateOpen = false; D.quietRun = 0; D.quietHangover = 0;
     D.voiceTurnOpen = false; D.turnAsr = ""; D.turnShown = false; D.turnIsEcho = false;
+    D.turnNudged = false; D.turnNudgedAt = 0;
     const startSpeakingBusy = typeof playCtx !== "undefined" && playCtx && typeof playTime !== "undefined" && playTime > 0 && playCtx.currentTime < playTime;
     if (startSpeakingBusy) {
       try { if (typeof bargeIn === "function") bargeIn("mic_start"); else if (typeof stopAllAudioPlayback === "function") stopAllAudioPlayback(); } catch (e) {}
@@ -324,8 +331,10 @@
     if (D.tickTimer) { clearInterval(D.tickTimer); D.tickTimer = null; }
     if (D.statTimer) { clearInterval(D.statTimer); D.statTimer = null; }
     D.gateOpen = false; D.speechRun = 0; D.dtRun = 0; D.preRoll = []; D.pttForce = false; D.hardCutDone = false;
+    D.quietGateOpen = false; D.quietRun = 0; D.quietHangover = 0;
     clearHold();
     D.voiceTurnOpen = false; D.turnAsr = ""; D.turnShown = false; D.turnIsEcho = false;
+    D.turnNudged = false; D.turnNudgedAt = 0;
     duck(false);
     try { updateAllMicButtons(false); } catch (e) {}
     setState(S.OFF, true);
@@ -443,7 +452,7 @@
         }
       }
     } else {
-      // 扬声器静默：全量直通，由服务端 VAD 全权判定；同时学习本底噪声
+      // 扬声器静默期：自适应环境底噪门限（v120 根治 MacBook 房间空调/风扇/呼吸微底噪 0.004~0.015 导致服务端 START_SENSITIVITY_HIGH VAD 持续 37s 永不闭合！）
       D.gateOpen = false; D.speechRun = 0; D.dtRun = 0; D.dtDip = 0;
       if (D.hardCutDone && D.duckTimer && rms > Math.max(D.noiseFloor * 3.0, CFG.holdMin || 0.011)) {
         // 扬声器已由 localHardCut 彻底切断并进入静默期，此时仍持续检测到人声能量 → 100% 物理确认为真人说话，撤销 2s 误报回滚计时并复位主音量
@@ -451,7 +460,48 @@
         duck(false);
         D.hardCutDone = false;
       }
-      learnNoise(rms);
+      const clampedFloor = Math.min(0.010, D.noiseFloor || 0.003);
+      const qOpenThr = Math.min(0.026, Math.max(CFG.absMin || 0.012, clampedFloor * 3.2));
+      const qHoldThr = Math.max(CFG.holdMin || 0.0105, qOpenThr * 0.85);
+      const qActive = D.pttForce || (rms >= (D.quietGateOpen ? qHoldThr : qOpenThr));
+      if (qActive) {
+        D.quietRun = (D.quietRun || 0) + 1;
+        if (!D.quietGateOpen) {
+          if (D.pttForce || D.preRoll.length === 0) {
+            // 按住说话或刚开麦首帧即为人声（preRoll 为空）：零延迟立即直通
+            D.quietGateOpen = true;
+            D.quietHangover = 12;
+            forward = true;
+          } else if (D.quietRun >= 2) {
+            // 已积累静默期底噪预卷：连续 2 帧 (80ms) 超阈过滤单帧鼠标/键盘瞬态声，随后 100% 1.0x 无损补发最近 12 帧 (480ms) 预卷（零吞字头！）
+            D.quietGateOpen = true;
+            D.quietRun = 0;
+            D.quietHangover = 12;
+            flushPreRoll();
+            forward = true;
+          } else {
+            forward = false;
+          }
+        } else {
+          D.quietHangover = 12; // 480ms 句中换气/逗号停顿保持
+          forward = true;
+        }
+      } else {
+        D.quietRun = 0;
+        if (D.quietGateOpen) {
+          if (--D.quietHangover > 0) {
+            forward = true;
+          } else {
+            // 说话结束满 480ms：立即关门并向服务端 VAD 投喂纯数字零静音帧 (SILENCE_B64)，确保服务端 VAD 在 550ms 内 100% 触发断句响应！
+            D.quietGateOpen = false;
+            learnNoise(rms);
+            forward = false;
+          }
+        } else {
+          learnNoise(rms);
+          forward = false;
+        }
+      }
     }
 
     if (!forward) {
@@ -572,6 +622,11 @@
       setTimeout(() => { try { reconnectFresh(true); } catch (e) {} }, Math.max(0, ms - 3000));
     }
     const sc = m.serverContent;
+    if (m.toolCall || (sc && (sc.outputTranscription || sc.modelTurn || sc.groundingMetadata))) {
+      D.turnReplyStarted = true;
+      D.turnNudged = false;
+      D.turnNudgedAt = 0;
+    }
     if (!sc) return;
 
     if (sc.interrupted) {
@@ -599,6 +654,8 @@
     }
     D.voiceTurnOpen = false;
     D.turnReplyStarted = false;
+    D.turnNudged = false;
+    D.turnNudgedAt = 0;
     clearHold();
     pushModelHistory();
   }
@@ -673,6 +730,8 @@
            .replace(/(?:寿司烧|受洗[收烧])/g, "寿喜烧")
            .replace(/(?:逆大逆[菜才]|奶酪玉米菜)/g, "意大利菜")
            .replace(/有供餐吗/g, "有中餐吗")
+           .replace(/有没用/g, "有没有")
+           .replace(/^\s*好友(?=我)/, "还有")
            .replace(/甜筒店/g, "甜品店")
            .replace(/^(?:月亮|预料|计量|面料|资料)(?=(?:有吗|呢|吗)[？?。.！!\s]*$)/g, "日料")
            .replace(/有(?:月亮|预料|计量|面料|资料)吗/g, "有日料吗")
@@ -700,6 +759,8 @@
     if (!chunk) return;
     const now = Date.now();
     D.lastInputTs = now;
+    D.turnNudged = false;
+    D.turnNudgedAt = 0;
     confirmBargeIn("asr");
     if (!D.voiceTurnOpen) {
       const replyAlreadyStreaming = !!(typeof window !== "undefined" && window.__newModelTurnStarted);
@@ -819,25 +880,71 @@
     D.bargeIns++;
     duck(false);
     D.gateOpen = false; D.speechRun = 0; D.hardCutDone = false;
+    D.quietGateOpen = false; D.quietRun = 0; D.quietHangover = 0;
     clearHold();
     D.voiceTurnOpen = false; D.turnAsr = ""; D.turnShown = false; D.turnIsEcho = false;
+    D.turnNudged = false; D.turnNudgedAt = 0;
     pushModelHistory();
     log("bargeIn:", reason);
   };
 
-  // ---------------- 派生状态机 + UI ----------------
+  // ---------------- 派生状态机 + UI + 双阶未响应自愈看门狗 (v120) ----------------
   function tick() {
     if (!D.micOn) return;
+    const now = Date.now();
     const busy = speakerBusy();
     // 本地硬切：仅当门仍处于开启态持续满 hardCutAfterMs 且服务端尚未确认（duckTimer 仍在）→ 掐断
     if (D.gateOpen && !D.hardCutDone && D.duckTimer && CFG.hardCutAfterMs > 0 &&
-        busy && Date.now() - D.gateOpenedAt >= CFG.hardCutAfterMs) {
+        busy && now - D.gateOpenedAt >= CFG.hardCutAfterMs) {
       localHardCut();
     }
+
+    // 双阶未响应自愈看门狗（根治多轮长句/陈述句如“还有我这中国人，我来这里就不想吃中餐相关的了。”卡在“正在思考与实时检索中…”）：
+    //   Stage 1 (2.5s)：用户已出 ASR 字幕，但上游 Gemini 3.8 Live 超过 2.5s 仍 0 字节回复（无论是底噪拖住 VAD 还是模型对无问号陈述句观望），
+    //                   立即关闭本地静默门并补发 clientContent (turnComplete: true) 强制触发模型立刻回答，同时保持麦克风常开！
+    //   Stage 2 (+6.5s)：若催答后又过 6.5s 仍 0 字节下行（上游半开死连接），自动无感重连并立即重放该句提问！
+    if (D.voiceTurnOpen && !D.turnIsEcho && !D.turnReplyStarted && !D.curModelText && D.turnAsr && !busy && !D.gateOpen && !D.pttForce) {
+      const appAnswered = (typeof currentModelTranscript !== "undefined" && currentModelTranscript) ||
+                          (typeof dispatchState !== "undefined" && dispatchState && (dispatchState.hasFc || dispatchState.hasMaps || dispatchState.hasSearch));
+      if (!appAnswered) {
+        if (!D.turnNudged && D.lastInputTs > 0 && (now - D.lastInputTs) >= (CFG.unansweredTurnMs || 2500)) {
+          D.turnNudged = true;
+          D.turnNudgedAt = now;
+          D.watchdogNudges = (D.watchdogNudges || 0) + 1;
+          D.quietGateOpen = false; D.quietRun = 0; D.quietHangover = 0;
+          if (!D.turnShown) showUserTurn();
+          if (wsOpen()) {
+            try {
+              sendAudioB64(SILENCE_B64);
+              ws.send(JSON.stringify({
+                clientContent: {
+                  turns: [{ role: "user", parts: [{ text: D.turnAsr }] }],
+                  turnComplete: true
+                }
+              }));
+              log("watchdog Stage-1 nudged unanswered turn:", D.turnAsr);
+            } catch (e) {}
+          }
+        } else if (D.turnNudged && D.turnNudgedAt > 0 && (now - D.turnNudgedAt) >= (CFG.reconnectStuckMs || 6500)) {
+          const retryText = D.turnAsr;
+          D.turnNudged = false;
+          D.turnNudgedAt = 0;
+          D.voiceTurnOpen = false;
+          D.watchdogReconnects = (D.watchdogReconnects || 0) + 1;
+          try {
+            if (typeof reconnectFresh === "function") reconnectFresh(false);
+            if (typeof sendQuery === "function" && retryText) {
+              setTimeout(() => { try { sendQuery(retryText); } catch (e2) {} }, 250);
+            }
+          } catch (e) {}
+        }
+      }
+    }
+
     let s;
     if (D.gateOpen || D.pttForce) s = S.USER;
     else if (busy) s = S.MODEL;
-    else if (Date.now() - D.lastInputTs < 1200) s = S.USER;
+    else if (now - D.lastInputTs < 1200) s = S.USER;
     else if (typeof sceneLock !== "undefined" && sceneLock) s = S.THINKING;
     else s = S.LISTENING;
     setState(s);
@@ -924,6 +1031,7 @@
       gateOpens: D.gateOpens, confirmed: D.confirmed, falseAlarms: D.falseAlarms, hardCuts: D.hardCuts,
       interrupts: D.interrupts, bargeIns: D.bargeIns,
       echoTurns: D.echoTurns, echoChunksDropped: D.echoChunksDropped, mutedEchoTurns: D.mutedEchoTurns,
+      watchdogNudges: D.watchdogNudges || 0, watchdogReconnects: D.watchdogReconnects || 0,
       resumeHandle: !!D.resumeHandle
     };
   };

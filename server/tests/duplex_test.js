@@ -989,6 +989,37 @@ const MODEL_TEXT = "为您推荐两个打卡点：第一家是滨海湾花园，
     assert("T27 序数导航旧店名串读防护：模型误传旧轮次店名时返回 DESTINATION_CORRECTED_TO_LATEST_OPTION 纠偏且由 __lastCorrectedFcDest 限制最多 1 次重试",
       /DESTINATION_CORRECTED_TO_LATEST_OPTION/.test(appSrc) &&
       /__lastCorrectedFcDest/.test(appSrc));
+
+    // T28: 根治线上 [client #732] 多轮对话“还有我这中国人，我来这里就不想吃中餐相关的了。”卡死在“正在思考与实时检索中…”（v120）：
+    //   1) 静默期 (!busy) 自适应环境底噪门限：人声结束后 480ms 自动关门并向服务端 VAD 发送纯零静音帧 SILENCE_B64，彻底杜绝 MacBook 房间底噪 (0.008~0.014) 拖死服务端 VAD；
+    //   2) 双阶未响应自愈看门狗：用户已出 ASR 字幕超过 2.5s 若上游仍 0 字节回复，自动补发 clientContent (turnComplete: true) 催答且保持 micOn=true；
+    //   3) 同音纠偏“有没用米线?” -> “有没有米线?” 及系统提示词【每句必应铁律】+ 打断后误道歉拦截。
+    const hQuiet = makeHarness();
+    await hQuiet.D().start("console");
+    for (let i = 0; i < 8; i++) hQuiet.pushFrame(0.06); // 用户说话 320ms
+    assert("T28a 静默期说话时 quietGateOpen 开启", hQuiet.D().quietGateOpen === true);
+    for (let i = 0; i < 12; i++) hQuiet.pushFrame(0.007); // 480ms 句尾保持期
+    const tailMark = hQuiet.audioFrames().length;
+    for (let i = 0; i < 15; i++) hQuiet.pushFrame(0.0075 + (i % 3) * 0.0015); // MacBook 房间空调/呼吸底噪 0.0075~0.0105
+    const quietTail = hQuiet.audioFrames().slice(tailMark);
+    assert("T28a 说话结束后 MacBook 房间底噪 (0.0075~0.0105) 100% 被替换为纯数字零静音帧 SILENCE_B64，确保服务端 VAD 必断句",
+      hQuiet.D().quietGateOpen === false && quietTail.length === 15 && quietTail.every(d => d === SILENCE_B64));
+
+    const hWd = makeHarness();
+    await hWd.D().start("console");
+    await hWd.serverMsg({ serverContent: { inputTranscription: { text: "还有我这中国人, 我来这里就不想吃中餐相关的了。" } } });
+    const sentBeforeWd = hWd.ws.sent.length;
+    hWd.advance(2600); // 超过 2.5s 上游仍未返回任何 modelTurn / toolCall
+    const nudgedMsg = hWd.ws.sent.slice(sentBeforeWd).find(f => f.clientContent && f.clientContent.turnComplete === true);
+    assert("T28b 上游 2.5s 无响应时看门狗自动补发 turnComplete:true 催答且保持麦克风常开 (micOn=true)",
+      !!nudgedMsg &&
+      nudgedMsg.clientContent.turns[0].parts[0].text === "还有我这中国人, 我来这里就不想吃中餐相关的了。" &&
+      hWd.D().micOn === true &&
+      hWd.D().stats().watchdogNudges === 1);
+    assert("T28c 同音纠偏‘有没用米线?’→‘有没有米线?’且 app.js 含【每句必应铁律】与打断道歉直航守卫",
+      hWd.D().sanitizeAllowedLanguageAsr("有没用米线?") === "有没有米线?" &&
+      /【每句必应铁律/.test(appSrc) &&
+      /OrdinalRescue/.test(appSrc));
   }
 
   console.log("\n" + passed + " passed, " + failed + " failed");

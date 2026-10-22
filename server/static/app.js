@@ -2214,6 +2214,7 @@ function connect() {
 - 【句首吞字还原（“没有法餐” = “有没有法餐”）】：句首轻读时若被转写为“没有法餐”、“没有西餐”、“福临有没有肉骨茶”，在美食上下文中【必须】还原为“附近有没有[该菜系/食物]推荐？”，立即推荐对应餐厅。
 - 【播报打断首词抗噪与跨国菜系还原】：播报中打断若出现近音（如“芝麻油菜有吗”→“西班牙菜有吗”、“啊我在有吗”→“法国菜有吗”、“黑脸一点/和医院一点”→“可以远一点”），立即按真实意图检索推荐。
 - 【当用户嫌慢或催促“快点/太慢了”】：直接干脆回应并承接上文（如：“好的，我加快语速！刚才说的两家店您看去哪家，还是换个口味？”）。
+- 【每句必应铁律（严禁对陈述句/身份与忌口表达保持沉默）】：无论用户说的是疑问句还是【不带问号的自然口语陈述句、偏好排除或身份说明】（例如：“还有我这中国人，我来这里就不想吃中餐相关的了。”、“我不想吃辣的。”、“我对海鲜过敏。”、“预算不想太高。”），你【必须 100% 立即开口回应】！先用半句自然共情承接（如“明白，来新加坡确实该尝尝地道异国或娘惹风味！”），随即立刻推荐 2 家符合排除条件的高分近店（如娘惹菜 Candlenut、法餐 Les Amis 或日料千两），【绝对禁止】把用户的陈述句当成“话没说完”而保持沉默不语！
 
 【三、用户当前精确出发点与就近检索铁律】
 - 当前起点：${landmark}（${regionName}，${addr}，纬度 ${lat}, 经度 ${lng}）。
@@ -2224,7 +2225,7 @@ function connect() {
 2) 实时天气/新闻/门票、周边餐馆商铺查询：按需调用 Google Search / Google Maps。
 3) 明确单一目的地导航（含复合提问如“查水幕秀时间并带我去最佳观赏点”）：立即在第一时间调用 start_navigation(destination="具体店名/地标", travel_mode="DRIVING")，口语一句话确认即可。
 4) 多候选推荐（如“推荐附近好吃的 / 有中餐吗 / 有法餐吗 / 北京菜有吗”）：用平实自然的口语推荐 2 家高分近店并询问去哪家，【严禁】在用户选定前提前调用 start_navigation。
-5) 【跟进选店零搜索秒回】：当用户说“去第一家/第二个/带我过去/走吧/直接导航”等指代上文已提过的地点时，【绝对禁止重复调用 Google Search】，直接从对话记忆锁定对应店名并在第一时间调用 start_navigation，用不超过 25 字自然确认（如“好的，马上为您规划去松发肉骨茶的路线！”）。`;
+5) 【跟进选店零搜索秒回（含播报中途被打断场景）】：当用户说“去第一家/第二个/第二家导航一下吧/带我过去/走吧/直接导航”等指代上文已提过的地点时，【绝对禁止重复调用 Google Search】；即使上一轮推荐在播报途中被用户打断（语音只念完第一家，但屏幕候选已显示第二家），也【严禁】说“抱歉刚才只提到了第一家”，必须直接从上轮准备好的对应序数店名在第一时间调用 start_navigation，用不超过 25 字自然确认（如“好的，马上为您规划前往恩恩可口面的路线！”）。`;
 
     // v90: 全双工引擎可用时启用服务端 VAD（开口即打断 START_OF_ACTIVITY_INTERRUPTS）+ 会话续接 + 上下文滑窗压缩；
     //      不支持 AudioWorklet 的浏览器沿用手动轮次（文字 / Web Speech 退路）
@@ -2445,6 +2446,7 @@ function connect() {
 
     if (sc.inputTranscription && sc.inputTranscription.text) {
       window.__foreignRescueSent = false;
+      window.__ordinalApologyRescued = false;
       if (duplexReady()) {
         // 全双工：交给引擎做语义回声侦测与短暂扣留，再由它清场 + 上屏（见 duplex.js acceptInputTranscription）。
         // 用 duplexReady 而不是 micOn：用户刚关麦时服务端仍会把已 flush 的最后一句转写下发，这一句也要按新一轮处理，
@@ -2496,6 +2498,18 @@ function connect() {
         }
         return;
       }
+      // 打断后选店秒航自愈守卫（v120 根治 [client #732] Turn 4）：
+      // 当上一轮推荐语音在念完第 1 家后被用户开口打断，屏幕推荐按钮已完整展示 [第1家, 第2家]，
+      // 用户紧接着说“第二家导航一下吧”，若模型因音频历史截断误答“抱歉，刚才只提到了…”，立即掐断道歉并直接触发第 2 家导航！
+      const ordRescueDest = resolveOrdinalOptionFromUserText(currentUserTranscript);
+      if (!window.__ordinalApologyRescued && ordRescueDest && isValidDestinationName(ordRescueDest) &&
+          /(?:导航|带我去|去第|第[一二三123][家个]|走吧)/.test(currentUserTranscript || "") &&
+          /(?:抱歉|不好意思)[，,\s]*刚才(?:只提到了|没来得及|还没)/.test(currentModelTranscript)) {
+        window.__ordinalApologyRescued = true;
+        console.log("[OrdinalRescue] 拦截打断后误道歉，直接为您启动目标导航:", ordRescueDest);
+        handleSelectRecommendationOption({ name: ordRescueDest, destination: ordRescueDest });
+        return;
+      }
       if (window.DuplexVoice) window.DuplexVoice.noteModelText(currentModelTranscript);
       broadcastModelTranscript(currentModelTranscript);
       tryRealtimeExtractAndRender(currentModelTranscript, sc.groundingMetadata);
@@ -2528,7 +2542,19 @@ function connect() {
           $("modelBubble").textContent = "";
         }
         currentModelTranscript += p.text;
-        if (window.DuplexVoice) window.DuplexVoice.noteModelText(currentModelTranscript);
+        // 打断后选店秒航自愈守卫（v120 根治 [client #732] Turn 4）：
+      // 当上一轮推荐语音在念完第 1 家后被用户开口打断，屏幕推荐按钮已完整展示 [第1家, 第2家]，
+      // 用户紧接着说“第二家导航一下吧”，若模型因音频历史截断误答“抱歉，刚才只提到了…”，立即掐断道歉并直接触发第 2 家导航！
+      const ordRescueDest = resolveOrdinalOptionFromUserText(currentUserTranscript);
+      if (!window.__ordinalApologyRescued && ordRescueDest && isValidDestinationName(ordRescueDest) &&
+          /(?:导航|带我去|去第|第[一二三123][家个]|走吧)/.test(currentUserTranscript || "") &&
+          /(?:抱歉|不好意思)[，,\s]*刚才(?:只提到了|没来得及|还没)/.test(currentModelTranscript)) {
+        window.__ordinalApologyRescued = true;
+        console.log("[OrdinalRescue] 拦截打断后误道歉，直接为您启动目标导航:", ordRescueDest);
+        handleSelectRecommendationOption({ name: ordRescueDest, destination: ordRescueDest });
+        return;
+      }
+      if (window.DuplexVoice) window.DuplexVoice.noteModelText(currentModelTranscript);
         broadcastModelTranscript(currentModelTranscript);
         tryRealtimeExtractAndRender(currentModelTranscript, sc.groundingMetadata);
         checkAndTriggerSmartNavigation(currentUserTranscript, currentModelTranscript, sc.groundingMetadata, false);
@@ -4429,7 +4455,7 @@ const OPT_ORDINAL_MARKERS = [
   { src: "首先\\s*(?:推荐的是|推荐|是|为)?", rank: 1 },
   { src: "其次\\s*(?:推荐的是|推荐|是|为)?", rank: 2 },
   { src: "(?:首推|先推|可以先去|可以先看|不妨先去|推荐试试|可以先试试|建议试试)\\s*(?:的是|是|为)?", rank: 1 },
-  { src: "(?:或者可以去|或者去|另外可以去|也可以去|也可以试试)\\s*(?:的是|是|为)?", rank: 2 },
+  { src: "(?:或者可以去|或者去|另外可以去|也可以去|也可以试试)\\s*(?:尝尝|试试|看看)?\\s*(?:的是|是|为)?", rank: 2 },
   { src: "(?:再次|再者|最后|然后|接着|另外)\\s*(?:推荐的是|推荐|是|为)", rank: 3 },
   { src: "其一\\s*(?:是|为)?", rank: 1 },
   { src: "其二\\s*(?:是|为)?", rank: 2 },
