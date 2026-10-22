@@ -964,8 +964,21 @@ const MODEL_TEXT = "为您推荐两个打卡点：第一家是滨海湾花园，
       hLang.D().sanitizeAllowedLanguageAsr("北京太有吗?") === "北京菜有吗?" &&
       hLang.D().sanitizeAllowedLanguageAsr("对。太有吗?") === "北京菜有吗?" &&
       hLang.D().sanitizeAllowedLanguageAsr("桃州太呢?") === "潮州菜呢?" &&
+      hLang.D().sanitizeAllowedLanguageAsr("曹周泰呢?") === "潮州菜呢?" &&
       hLang.D().sanitizeAllowedLanguageAsr("本方太有吗?") === "本帮菜有吗?" &&
+      hLang.D().sanitizeAllowedLanguageAsr("粉红派有吗?") === "本帮菜有吗?" &&
+      hLang.D().sanitizeAllowedLanguageAsr("南方派有吗?") === "本帮菜有吗?" &&
+      hLang.D().sanitizeAllowedLanguageAsr("奶酪玉米菜有吗?") === "意大利菜有吗?" &&
+      hLang.D().sanitizeAllowedLanguageAsr("那他国菜呢?") === "那泰国菜呢?" &&
+      hLang.D().sanitizeAllowedLanguageAsr("用北菜有吗?") === "东北菜有吗?" &&
+      hLang.D().sanitizeAllowedLanguageAsr("de有受洗收吗?") === "额，有寿喜烧吗?" &&
+      hLang.D().sanitizeAllowedLanguageAsr("甜筒店有吗?") === "甜品店有吗?" &&
+      hLang.D().sanitizeAllowedLanguageAsr("那逆大逆才有吗?") === "那意大利菜有吗?" &&
       hLang.D().sanitizeAllowedLanguageAsr("月亮有吗?") === "日料有吗?" &&
+      hLang.D().sanitizeAllowedLanguageAsr("面料有吗?") === "日料有吗?" &&
+      hLang.D().sanitizeAllowedLanguageAsr("北京太友吗?") === "北京菜有吗?" &&
+      hLang.D().sanitizeAllowedLanguageAsr("很棒。派友吗?") === "本帮菜有吗?" &&
+      hLang.D().sanitizeAllowedLanguageAsr("我没有。香菜。") === "嗯，有没有湘菜？" &&
       hLang.D().sanitizeAllowedLanguageAsr("预料有吗?") === "日料有吗?" &&
       hLang.D().sanitizeAllowedLanguageAsr("在我去第一家直接导航。") === "带我去第一家直接导航。" &&
       hLang.D().sanitizeAllowedLanguageAsr("take me to Marina Bay Sands") === "take me to Marina Bay Sands");
@@ -973,6 +986,9 @@ const MODEL_TEXT = "为您推荐两个打卡点：第一家是滨海湾花园，
     assert("T26c 服务端下发西语幻觉 ‘¿Hay un cajero?’ 时，用户气泡立即自愈显示为 ‘北京菜有吗？’",
       hLang.calls.userBroadcasts.at(-1) === "北京菜有吗？",
       "userBroadcast=" + hLang.calls.userBroadcasts.at(-1));
+    assert("T27 序数导航旧店名串读防护：模型误传旧轮次店名时返回 DESTINATION_CORRECTED_TO_LATEST_OPTION 纠偏且由 __lastCorrectedFcDest 限制最多 1 次重试",
+      /DESTINATION_CORRECTED_TO_LATEST_OPTION/.test(appSrc) &&
+      /__lastCorrectedFcDest/.test(appSrc));
   }
 
   console.log("\n" + passed + " passed, " + failed + " failed");

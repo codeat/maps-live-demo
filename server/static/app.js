@@ -2252,7 +2252,7 @@ function connect() {
         "新疆菜", "云南菜", "贵州菜", "台湾菜", "客家菜", "海南鸡饭",
         "肉骨茶", "火锅", "中餐", "法餐", "西班牙菜", "意大利菜", "日料", "日本料理",
         "韩餐", "泰国菜", "越南菜", "印度菜", "西餐", "北京烤鸭", "湘香湖南菜", "农耕记",
-        "寿喜烧", "第一家", "第二家", "第三家", "直接导航", "带我去第一家", "去第二家"
+        "寿喜烧", "甜品店", "第一家", "第二家", "第三家", "直接导航", "带我去第一家", "去第二家"
       ]
     };
 
@@ -2434,7 +2434,10 @@ function connect() {
       if (/第\s*[三3３]\s*[家个处座间]?/.test(liveText) && list[2]) {
         return list[2].destination || list[2].name || "";
       }
-      if (/第\s*[一1１]\s*[家个处座间]?/.test(liveText) && list[0]) {
+      if (/(?:第\s*[一1１]\s*[家个处座间]?|制定一家)/.test(liveText) && list[0]) {
+        return list[0].destination || list[0].name || "";
+      }
+      if (/^\s*确定[。，,\s]*直接导航/.test(liveText) && list[0]) {
         return list[0].destination || list[0].name || "";
       }
       return "";
@@ -2550,8 +2553,9 @@ function connect() {
         // 终态抽取（final=true）：接受句尾未加标点的最后一个名字，并用本轮 grounding 标题对齐权威名
         tryRealtimeExtractAndRender(currentModelTranscript, lastTurnGroundingMeta, true);
         if (!lastRenderedOptionsKey) {
-          // 本轮完全没有推荐多个候选项，彻底清空遗留旧按键
+          // 本轮完全没有推荐多个候选项，彻底清空遗留旧按键与旧候选列表（防止后续“去第一家”误命中上上轮已隐藏的旧店铺）
           renderRecommendationOptions([]);
+          window.lastRecommendedOptionsList = [];
         }
       }
       // 客户端智能安全兜底 (Final Turn SafetyNet)
@@ -2576,7 +2580,7 @@ function connect() {
           const timer = setTimeout(() => {
             if (window.__pendingToolAsrWaiter) window.__pendingToolAsrWaiter = null;
             resolve();
-          }, 90);
+          }, 260);
           window.__pendingToolAsrWaiter = () => {
             clearTimeout(timer);
             resolve();
@@ -2585,7 +2589,8 @@ function connect() {
       }
       renderRecommendationOptions([]); // 触发函数调用（如导航规划）时，立即清除候选推荐按键！
       (m.toolCall.functionCalls || []).forEach(fc => {
-        let dest = (fc.args && fc.args.destination) || "";
+        const rawDest = String((fc.args && fc.args.destination) || "").trim();
+        let dest = rawDest;
         // 若用户明确说了“第一家/第二家/第三家”，优先以屏幕上实际展示给用户的候选按钮序号为准（防止播报中途打断导致服务端截断错位）
         const explicitOrd = resolveOrdinalOptionFromUserText(currentUserTranscript);
         if (explicitOrd && isValidDestinationName(explicitOrd)) {
@@ -2618,18 +2623,41 @@ function connect() {
           }
           expectedUiFc = null;
         }
-        ws.send(JSON.stringify({toolResponse: {functionResponses: [
-          {
-            id: fc.id,
-            name: fc.name,
-            response: {
+        // 关键防串读护栏 (v117)：当上一轮推荐播报途中被用户语音打断时，Gemini Live 可能截断上一轮模型记忆并误传更早轮次的旧店名
+        // （例如 E1 推荐“喜乐” -> E2 推荐“寿喜烧千代”被打断 -> E3 说“去第一家”时模型传了 destination="喜乐"）。
+        // 此时若返回 status:"ok"，模型会误以为自己传的旧店名已生效而在语音中脱口念出旧店名！
+        // 改用 error 字段显式通知模型旧店名已被拦截纠偏，触发一次零闪烁幂等重调或直接准确播报最新目标店名（最多纠偏 1 次防死循环）。
+        const needOrdinalCorrection = Boolean(
+          fc.name === "start_navigation" &&
+          rawDest &&
+          explicitOrd &&
+          !isSameDestination(rawDest, dest) &&
+          window.__lastCorrectedFcDest !== dest
+        );
+        if (needOrdinalCorrection) {
+          window.__lastCorrectedFcDest = dest;
+        } else {
+          window.__lastCorrectedFcDest = "";
+        }
+        const toolRespPayload = needOrdinalCorrection
+          ? {
+              error: `DESTINATION_CORRECTED_TO_LATEST_OPTION: 检测到「${rawDest}」不是刚才屏幕上最新候选序号对应的中文店名，系统已在地图上自动纠偏并成功规划前往「${dest}」（${preferredMode}）。请立即改用 destination="${dest}" 重新调用一次 start_navigation 对齐记录，并在语音回复中准确说出：「好的，马上为您规划去${dest}的路线！」（严禁提及「${rawDest}」，也严禁道歉）。`,
+              actual_destination: dest,
+              travel_mode: preferredMode
+            }
+          : {
               result: {
                 status: "ok",
                 destination: dest,
                 travel_mode: preferredMode,
                 spoken_confirmation_hint: `路线已规划至「${dest}」，请务必在语音回复中准确说出「${dest}」（严禁说成其他店名）！`
               }
-            }
+            };
+        ws.send(JSON.stringify({toolResponse: {functionResponses: [
+          {
+            id: fc.id,
+            name: fc.name,
+            response: toolRespPayload
           }]}}));
       });
     }
