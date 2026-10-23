@@ -2401,6 +2401,7 @@ function connect() {
 
     if (m.setupComplete) {
       ready = true;
+      wsReconnectAttempt = 0;   // v121: 会话成功建立即清零退避计数
       $("btnSend").disabled = false;
       if ($("stateDot")) $("stateDot").style.background = "#34a853";
       if ($("metaStateDot")) $("metaStateDot").style.background = "#34a853";
@@ -2689,7 +2690,7 @@ function connect() {
     }
   };
 
-  ws.onclose = () => {
+  ws.onclose = (ev) => {
     if (!ready && typeof window !== "undefined" && window.DuplexVoice) {
       try { window.DuplexVoice.clearResumeHandle(); } catch (e) {}
     }
@@ -2699,9 +2700,31 @@ function connect() {
     clearLateAudioGate("ws_close");
     if ($("stateDot")) $("stateDot").style.background = "#ea4335";
     if ($("metaStateDot")) $("metaStateDot").style.background = "#ea4335";
-    if ($("metaStateText")) $("metaStateText").textContent = "重连中…";
-    setTimeout(connect, 2000);
+    // v121: 读取服务端透传的上游关闭码/原因，按“配额(1008/429) / 容量 / 普通断线”差异化指数退避，杜绝 2s 一次的无退避重连风暴
+    const code = (ev && typeof ev.code === "number") ? ev.code : 0;
+    const reason = String((ev && ev.reason) || "");
+    const quotaHit = code === 1008 || /429|quota|RESOURCE_EXHAUSTED|exceeded|rate limit|billing/i.test(reason);
+    const capacityHit = !quotaHit && /resource exhausted|overloaded|try again later|unavailable|503/i.test(reason);
+    const delay = computeReconnectDelay(quotaHit ? "quota" : (capacityHit ? "capacity" : "other"));
+    wsReconnectAttempt++;
+    try { remoteLog(quotaHit || capacityHit ? "ERROR" : "WARN", "WS_CLOSE", `连接关闭 code=${code} reason=${reason || "(无)"} attempt=${wsReconnectAttempt} 下次重连 ${Math.round(delay / 1000)}s`, { code, reason, attempt: wsReconnectAttempt, delayMs: delay }); } catch (e) {}
+    if ($("metaStateText")) $("metaStateText").textContent = quotaHit ? "检索配额受限 · 稍后重连" : (capacityHit ? "模型繁忙 · 稍后重连" : "重连中…");
+    if (quotaHit) {
+      try { showVoiceToast(`⚠️ Gemini 上游配额/速率受限（${code}${reason ? " · " + reason.slice(0, 60) : ""}），${Math.round(delay / 1000)} 秒后自动重连；每日配额于太平洋时间 0 点（北京时间 15:00）重置`, 8000); } catch (e) {}
+    } else if (capacityHit) {
+      try { showVoiceToast(`⚠️ Gemini 模型暂时繁忙，${Math.round(delay / 1000)} 秒后自动重连`, 5000); } catch (e) {}
+    }
+    setTimeout(connect, delay);
   };
+}
+
+// v121: 重连退避策略（普通断线 2s→4s→8s→16s 封顶 30s；容量不足封顶 60s；配额 429 起步 60s 封顶 300s），setupComplete 后清零
+let wsReconnectAttempt = 0;
+function computeReconnectDelay(kind) {
+  const n = Math.max(0, wsReconnectAttempt | 0);
+  if (kind === "quota") return Math.min(300000, 60000 * Math.pow(2, Math.min(n, 3)));
+  if (kind === "capacity") return Math.min(60000, 5000 * Math.pow(2, Math.min(n, 4)));
+  return Math.min(30000, 2000 * Math.pow(2, Math.min(n, 4)));
 }
 
 function reconnectFresh(keepResumeHandle) {

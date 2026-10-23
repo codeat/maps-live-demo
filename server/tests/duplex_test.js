@@ -70,7 +70,7 @@ function fnBody(name) {
   assert("static: 提示词芯片不再在发送前把 sceneLock 置 false（否则迟到帧门无法布置）",
     !/btn\.onclick = \(\) => \{\s*resumeAudioIfNeeded\(\);\s*sceneLock = false;/.test(appSrc));
   assert("static: 连接断开 / 主动重连时复位 sceneLock 并解除迟到帧门",
-    /ws\.onclose = \(\) => \{[\s\S]*?ready = false;[\s\S]*?sceneLock = false;\s*clearLateAudioGate\("ws_close"\);/.test(appSrc) &&
+    /ws\.onclose = \(ev\) => \{[\s\S]*?ready = false;[\s\S]*?sceneLock = false;\s*clearLateAudioGate\("ws_close"\);/.test(appSrc) &&
     /ready = false;\s*sceneLock = false;\s*clearLateAudioGate\("reconnect"\);\s*connect\(\);/.test(appSrc));
   assert("static: 旧的 SINK_VIA_ELEMENT（TrackAudioRenderer 路径，对 Chrome AEC 无效）已被回环通道取代",
     !/SINK_VIA_ELEMENT/.test(appSrc) && /RTCPeerConnection/.test(appSrc) && /createMediaStreamDestination/.test(appSrc));
@@ -202,7 +202,7 @@ function makeHarness(opts = {}) {
 
   // app.js 顶层（切片之外）的全局与被切片依赖的函数：能用真实实现的就切真实实现，其余记录调用的桩
   const prelude = `
-let ws = __ws; let ready = true; let sceneLock = false; let pending = null;
+let ws = __ws; let ready = true; let sceneLock = false; let pending = null; let wsReconnectAttempt = 0;
 let currentUserTranscript = ""; let currentModelTranscript = "";
 let activeDestination = ""; let selectedTravelMode = "DRIVING"; let lastRecommendedDestination = "";
 let recognition = null; let isRecording = false; let userWantsRecording = false; let voiceSilenceTimer = null;
@@ -238,7 +238,7 @@ function checkAndTriggerSmartNavigation() {}
   const playPcmSrc = slice("function playPcm(b64) {", "// ---------------- 交互调度与发送");
   const sendSrc = slice("function sendQuery(text) {", "async function initApp() {");
   const optSrc = slice("function handleSelectRecommendationOption(opt) {", "// v78: 纯实时动态推荐选项抽取引擎 2.0");
-  const onmsgSrc = slice("  ws.onmessage = async (ev) => {", "  ws.onclose = () => {").replace("ws.onmessage = ", "this.__onmessage = ");
+  const onmsgSrc = slice("  ws.onmessage = async (ev) => {", "  ws.onclose = (ev) => {").replace("ws.onmessage = ", "this.__onmessage = ");
   const accessors = `
 this.__g = () => ({ playCtx, playTime, activeAudioSources, isModelSpeaking, masterGain, audioSinkMode, audioSinkNodes, sceneLock, lateAudioGate,
   currentUserTranscript, currentModelTranscript, activeDestination, selectedTravelMode, expectedUiFc, duplexSetupActive, TEXT_INPUT_MODE, pending, voiceScope });
@@ -1020,6 +1020,31 @@ const MODEL_TEXT = "为您推荐两个打卡点：第一家是滨海湾花园，
       hWd.D().sanitizeAllowedLanguageAsr("有没用米线?") === "有没有米线?" &&
       /【每句必应铁律/.test(appSrc) &&
       /OrdinalRescue/.test(appSrc));
+
+    // T29 (v121): 配额/限流可观测性与重连退避（吸取客户 sei-ai-test Live API 429 事故：拿不到关闭原因 → 2s 无退避重连 → 每小时 1,400+ 次 429 的重连风暴）
+    //   1) main.py 必须记录并透传上游 WebSocket 关闭码/原因（classify_upstream_close + client.close(code=relay_code)），不得再静默 break；
+    //   2) app.js ws.onclose 必须读取 ev.code/ev.reason，配额(1008/429)走 60s 起步退避、普通断线 2s→4s→8s→16s 封顶 30s，setupComplete 清零。
+    assert("T29a main.py 记录并透传上游关闭码/原因（配额/容量分类）",
+      /def classify_upstream_close\(code, reason\)/.test(mainPy) &&
+      /上游 Gemini Live 通道关闭 kind=\{kind\} code=/.test(mainPy) &&
+      /await client\.close\(code=relay_code, message=relay_reason\)/.test(mainPy) &&
+      !/elif msg\.type in \(WSMsgType\.CLOSE, WSMsgType\.CLOSING, WSMsgType\.ERROR\):\s*break\s*\n\s*async def watchdog/.test(mainPy));
+    assert("T29b app.js ws.onclose 读取 ev.code/ev.reason 并按配额/容量/普通断线差异化退避，setupComplete 清零",
+      /ws\.onclose = \(ev\) => \{[\s\S]*?const quotaHit = code === 1008 \|\| \/429\|quota\|RESOURCE_EXHAUSTED/.test(appSrc) &&
+      /setTimeout\(connect, delay\);/.test(appSrc) &&
+      /if \(m\.setupComplete\) \{\s*ready = true;\s*wsReconnectAttempt = 0;/.test(appSrc));
+    {
+      const a = appSrc.indexOf("let wsReconnectAttempt = 0;");
+      const b = appSrc.indexOf("\n}\n", appSrc.indexOf("function computeReconnectDelay", a)) + 3;
+      const bk = {};
+      vm.createContext(bk);
+      vm.runInContext(appSrc.slice(a, b) + "\nthis.seq = (kind, n) => { const out = []; for (let i = 0; i < n; i++) { wsReconnectAttempt = i; out.push(computeReconnectDelay(kind)); } return out; };", bk);
+      assert("T29c 普通断线退避 2s→4s→8s→16s→30s 封顶；配额 429 退避 60s→120s→240s→300s 封顶；容量 5s 起步封顶 60s",
+        JSON.stringify(bk.seq("other", 6)) === JSON.stringify([2000, 4000, 8000, 16000, 30000, 30000]) &&
+        JSON.stringify(bk.seq("quota", 5)) === JSON.stringify([60000, 120000, 240000, 300000, 300000]) &&
+        JSON.stringify(bk.seq("capacity", 5)) === JSON.stringify([5000, 10000, 20000, 40000, 60000]),
+        "other=" + JSON.stringify(bk.seq("other", 6)) + " quota=" + JSON.stringify(bk.seq("quota", 5)) + " capacity=" + JSON.stringify(bk.seq("capacity", 5)));
+    }
   }
 
   console.log("\n" + passed + " passed, " + failed + " failed");

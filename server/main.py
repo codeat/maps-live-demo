@@ -407,6 +407,20 @@ async def directions(request):
             return web.json_response(data)
 
 
+def classify_upstream_close(code, reason):
+    """v121: 把上游 Gemini Live WebSocket 关闭/错误原因归类：quota（配额/限速 429）/ capacity（容量不足）/ normal / other。
+    用于日志留痕 + 透传给浏览器做差异化退避（客户 sei-ai-test 事故的教训：拿不到关闭原因就只能盲目 2s 一次重连，自己打出重连风暴）。"""
+    text = (reason or "")
+    low = text.lower()
+    if any(k in low for k in ("quota", "resource_exhausted", "exceeded", "rate limit", "429", "billing")) or code in (429, 1008):
+        return "quota"
+    if any(k in low for k in ("resource exhausted", "overloaded", "try again later", "unavailable", "503")):
+        return "capacity"
+    if code in (1000, 1001):
+        return "normal"
+    return "other"
+
+
 async def ws_proxy(request):
     """浏览器 <-> 本服务 <-> Google Live API 的双向透传（长连接全双工版 + 全链路本地事件记录）。"""
     ws_proxy.n = getattr(ws_proxy, "n", 0) + 1
@@ -436,9 +450,15 @@ async def ws_proxy(request):
                                             max_msg_size=16 * 1024 * 1024,
                                             heartbeat=30)
     except Exception as e:  # noqa: BLE001
-        log_event("ERROR", f"连结上游 Gemini Live API 失败: {e}", client_id=cid)
-        await client.send_json({"error": "upstream connect failed: %s" % e})
-        await client.close()
+        status = getattr(e, "status", None) or getattr(e, "code", None)
+        kind = classify_upstream_close(status, str(e))
+        log_event("QUOTA" if kind == "quota" else "ERROR",
+                  f"连结上游 Gemini Live API 失败 (kind={kind} status={status}): {e}", level="ERROR", client_id=cid)
+        await client.send_json({"error": "upstream connect failed: %s" % e, "status": status, "kind": kind})
+        try:
+            await client.close(code=1008 if kind == "quota" else 1011, message=str(e).encode("utf-8")[:120])
+        except Exception:  # noqa: BLE001
+            await client.close()
         await session.close()
         return client
     log_event("WS_CONN", "已成功桥接上游 Gemini Live API 会话通道", client_id=cid)
@@ -446,6 +466,7 @@ async def ws_proxy(request):
     last_up = time.monotonic()
     n_up = 0
     n_audio = 0          # 全双工上行 PCM 帧计数（25 帧/秒，不记录内容）
+    upstream_close = {"code": None, "reason": ""}   # v121: 上游关闭码/原因（配额 429 / 容量 / goAway 续接）必须可观测、可透传
 
     async def c2u():
         nonlocal last_up, n_up, n_audio
@@ -500,7 +521,16 @@ async def ws_proxy(request):
                 break
 
     async def u2c():
-        async for msg in upstream:
+        # v121: 不能用 `async for msg in upstream`——aiohttp 的异步迭代器遇到 CLOSE/CLOSING/CLOSED 帧会直接 StopAsyncIteration，
+        # 循环体永远看不到关闭码与原因（这正是此前“只看到会话通道关闭、说不出是哪条配额”的根因）。改用显式 receive() 拿到 CLOSE 帧的 code/reason。
+        while True:
+            try:
+                msg = await upstream.receive()
+            except Exception as e:  # noqa: BLE001
+                upstream_close["code"] = 1011
+                upstream_close["reason"] = f"upstream receive error: {e}"[:120]
+                log_event("WS_CONN", f"上游 Gemini Live 通道异常 reason={upstream_close['reason']}", level="ERROR", client_id=cid)
+                break
             if msg.type in (WSMsgType.TEXT, WSMsgType.BINARY):
                 raw_text = msg.data if msg.type == WSMsgType.TEXT else (msg.data.decode("utf-8", errors="ignore") if isinstance(msg.data, (bytes, bytearray)) else "")
                 if raw_text and (raw_text.startswith("{") or raw_text.startswith("[")):
@@ -529,6 +559,12 @@ async def ws_proxy(request):
                                 log_tool_call(cid, fc.get("name", "unknown"), fc.get("args", {}))
                                 analytics.session_bump(cid, "tool_calls")
                                 analytics.record_tool_event(cid, fc.get("name", "unknown"), fc.get("args", {}))
+                        if isinstance(parsed.get("error"), dict):
+                            err = parsed["error"]
+                            err_text = json.dumps(err, ensure_ascii=False)[:600]
+                            kind = classify_upstream_close(err.get("code"), err_text)
+                            log_event("UPSTREAM_ERROR" if kind == "other" else "QUOTA",
+                                      f"上游返回错误帧 ({kind}): {err_text}", level="ERROR", client_id=cid)
                         if "groundingMetadata" in sc:
                             gm = sc["groundingMetadata"]
                             if gm.get("webSearchQueries"):
@@ -544,7 +580,22 @@ async def ws_proxy(request):
                     await client.send_str(msg.data)
                 else:
                     await client.send_bytes(msg.data)
-            elif msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.ERROR):
+            elif msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED, WSMsgType.ERROR):
+                # v121: 上游关闭/出错必须留痕并透传给浏览器（此前这里静默 break，一旦撞上 429 配额/容量限流，前端与日志都只能看到“会话通道关闭”，
+                # 和客户 sei-ai-test 事故里“说不出是哪条配额”一模一样；前端拿不到原因就会 2s 一次无退避重连，自己把自己打成重连风暴）
+                if msg.type == WSMsgType.ERROR:
+                    upstream_close["code"] = 1011
+                    upstream_close["reason"] = f"upstream error: {msg.data}"[:120]
+                elif msg.type == WSMsgType.CLOSE:
+                    upstream_close["code"] = msg.data if isinstance(msg.data, int) else (upstream.close_code or 1005)
+                    upstream_close["reason"] = str(msg.extra or "")[:120]
+                else:
+                    upstream_close["code"] = upstream.close_code or 1005
+                    upstream_close["reason"] = ""
+                kind = classify_upstream_close(upstream_close["code"], upstream_close["reason"])
+                log_event("QUOTA" if kind == "quota" else "WS_CONN",
+                          f"上游 Gemini Live 通道关闭 kind={kind} code={upstream_close['code']} reason={upstream_close['reason'] or '(无)'}",
+                          level="ERROR" if kind in ("quota", "capacity") else "INFO", client_id=cid)
                 break
 
     async def watchdog():
@@ -566,7 +617,18 @@ async def ws_proxy(request):
         await upstream.close()
         await session.close()
         if not client.closed:
-            await client.close()
+            # v121: 把上游关闭码与原因原样透传给浏览器（1005/1006 不能上线发送，映射为 1011），前端据此做指数退避并提示用户
+            relay_code = upstream_close["code"]
+            if relay_code in (None, 1005, 1006, 1015):
+                relay_code = 1011 if upstream_close["code"] in (1005, 1006, 1015) else 1000
+            relay_reason = (upstream_close["reason"] or ("upstream closed without status" if upstream_close["code"] in (1005, 1006, 1015) else "")).encode("utf-8")[:120]
+            try:
+                await client.close(code=relay_code, message=relay_reason)
+            except Exception:  # noqa: BLE001
+                try:
+                    await client.close()
+                except Exception:  # noqa: BLE001
+                    pass
         try:
             analytics.session_end(cid)
         except Exception as e:  # noqa: BLE001
